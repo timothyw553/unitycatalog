@@ -25,7 +25,6 @@ public class GcpCredentialVendor {
 
   public static final List<String> INITIAL_SCOPES =
       List.of("https://www.googleapis.com/auth/cloud-platform");
-
   private final Map<String, GcsStorageConfig> gcsConfigurations;
   private final Map<String, GcpCredentialsGenerator> credentialGenerators =
       new ConcurrentHashMap<>();
