@@ -15,6 +15,7 @@ import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.connector.catalog._
 import org.apache.spark.sql.connector.expressions.Transform
+import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.sparkproject.guava.base.Preconditions
@@ -33,7 +34,7 @@ class UCSingleCatalog
   with SupportsNamespaces
   with Logging {
 
-  private val ucManagedDeltaOnlyMsg = "is only supported for UC-managed Delta tables"
+  private val ucDeltaOnlyMsg = "is only supported for Delta tables registered in Unity Catalog"
 
   private[this] var uri: URI = null
   private[this] var tokenProvider: TokenProvider = null
@@ -183,16 +184,15 @@ class UCSingleCatalog
       })
   }
 
-  private def loadExistingManagedTablePropsForReplace(
+  private def loadExistingDeltaTablePropsForReplace(
       ident: Identifier,
       tableInfo: io.unitycatalog.client.model.TableInfo,
       properties: util.Map[String, String],
       operation: String): util.Map[String, String] = {
     rejectSystemManagedProperties(properties)
 
-    if (tableInfo.getTableType != TableType.MANAGED ||
-      tableInfo.getDataSourceFormat != DataSourceFormat.DELTA) {
-      throw new UnsupportedOperationException(s"$operation $ucManagedDeltaOnlyMsg")
+    if (tableInfo.getDataSourceFormat != DataSourceFormat.DELTA) {
+      throw new UnsupportedOperationException(s"$operation $ucDeltaOnlyMsg")
     }
 
     val fullTableName = UCSingleCatalog.fullTableNameForApi(name(), ident)
@@ -205,31 +205,55 @@ class UCSingleCatalog
 
     val newProps = new util.HashMap[String, String]
     newProps.putAll(properties)
-    Option(tableInfo.getProperties).foreach { existingProps =>
-      List(UCTableProperties.DELTA_CATALOG_MANAGED_KEY,
-        UCTableProperties.DELTA_CATALOG_MANAGED_KEY_NEW)
-        .find(existingProps.containsKey)
-        .foreach(key => newProps.put(key, existingProps.get(key)))
+    val tableType = tableInfo.getTableType
+    tableType match {
+      case TableType.MANAGED =>
+        Option(tableInfo.getProperties).foreach { existingProps =>
+          List(UCTableProperties.DELTA_CATALOG_MANAGED_KEY,
+            UCTableProperties.DELTA_CATALOG_MANAGED_KEY_NEW)
+            .find(existingProps.containsKey)
+            .foreach(key => newProps.put(key, existingProps.get(key)))
+        }
+        newProps.put(TableCatalog.PROP_IS_MANAGED_LOCATION, "true")
+      case TableType.EXTERNAL =>
+        Option(properties.get(TableCatalog.PROP_LOCATION)).foreach { requestedLocation =>
+          if (UCSingleCatalog.normalizeLocation(requestedLocation) !=
+            UCSingleCatalog.normalizeLocation(tableLocation)) {
+            throw new UnsupportedOperationException(
+              s"$operation cannot change the registered location of UC external Delta table " +
+                s"$fullTableName")
+          }
+        }
+        // Preserve the UC-registered location as the source of truth for staged external replace.
+        newProps.put(TableCatalog.PROP_LOCATION, tableLocation)
+      case _ =>
+        throw new UnsupportedOperationException(s"$operation $ucDeltaOnlyMsg")
     }
-    newProps.put(TableCatalog.PROP_IS_MANAGED_LOCATION, "true")
     newProps.put(UCSingleCatalog.EXISTING_TABLE_LOCATION_KEY, tableLocation)
-    newProps.put(UCSingleCatalog.EXISTING_TABLE_TYPE_KEY, tableInfo.getTableType.name())
+    newProps.put(UCSingleCatalog.EXISTING_TABLE_TYPE_KEY, tableType.name())
     newProps.put(UCSingleCatalog.EXISTING_TABLE_ID_KEY, tableId)
 
-    val temporaryCredentials = temporaryCredentialsApi.generateTemporaryTableCredentials(
-      new GenerateTemporaryTableCredential().tableId(tableId).operation(TableOperation.READ_WRITE))
-    val tableScheme = new Path(tableLocation).toUri.getScheme
-    val credentialProps = CredPropsUtil.createTableCredProps(
-      renewCredEnabled,
-      tableScheme,
-      uri.toString,
-      tokenProvider,
-      tableId,
-      TableOperation.READ_WRITE,
-      temporaryCredentials,
-    )
-    UCSingleCatalog.setCredentialProps(newProps, credentialProps)
-    newProps
+    tableType match {
+      case TableType.MANAGED =>
+        val temporaryCredentials = temporaryCredentialsApi.generateTemporaryTableCredentials(
+          new GenerateTemporaryTableCredential().tableId(tableId).operation(TableOperation.READ_WRITE))
+        val tableScheme = new Path(tableLocation).toUri.getScheme
+        val credentialProps = CredPropsUtil.createTableCredProps(
+          renewCredEnabled,
+          tableScheme,
+          uri.toString,
+          tokenProvider,
+          tableId,
+          TableOperation.READ_WRITE,
+          temporaryCredentials,
+        )
+        UCSingleCatalog.setCredentialProps(newProps, credentialProps)
+        newProps
+      case TableType.EXTERNAL =>
+        prepareExternalTableProperties(newProps, PathOperation.PATH_READ_WRITE)
+      case _ =>
+        throw new UnsupportedOperationException(s"$operation $ucDeltaOnlyMsg")
+    }
   }
 
   private def rejectSystemManagedProperties(properties: util.Map[String, String]): Unit = {
@@ -248,11 +272,12 @@ class UCSingleCatalog
 
   /** Prepares properties for external table creation (path credentials). */
   private def prepareExternalTableProperties(
-      properties: util.Map[String, String]): util.Map[String, String] = {
+      properties: util.Map[String, String],
+      pathOperation: PathOperation = PathOperation.PATH_CREATE_TABLE): util.Map[String, String] = {
     val location = properties.get(TableCatalog.PROP_LOCATION)
     assert(location != null)
     val cred = temporaryCredentialsApi.generateTemporaryPathCredentials(
-      new GenerateTemporaryPathCredential().url(location).operation(PathOperation.PATH_CREATE_TABLE))
+      new GenerateTemporaryPathCredential().url(location).operation(pathOperation))
     val newProps = new util.HashMap[String, String]
     newProps.putAll(properties)
 
@@ -262,7 +287,7 @@ class UCSingleCatalog
       uri.toString,
       tokenProvider,
       location,
-      PathOperation.PATH_CREATE_TABLE,
+      pathOperation,
       cred)
 
     UCSingleCatalog.setCredentialProps(newProps, credentialProps)
@@ -313,17 +338,22 @@ class UCSingleCatalog
       schema: StructType,
       partitions: Array[Transform],
       properties: util.Map[String, String]): StagedTable = {
-    val (stagingCatalog, existingTable) = prepareManagedDeltaReplaceOrCreateOrReplace(
+    val (stagingCatalog, existingTable) = prepareDeltaReplaceOrCreateOrReplace(
       ident,
       properties,
       "REPLACE TABLE",
       allowMissingTable = false)
-    val newProps = loadExistingManagedTablePropsForReplace(
+    val existing = existingTable.getOrElse(throw new NoSuchTableException(ident))
+    val newProps = loadExistingDeltaTablePropsForReplace(
       ident,
-      existingTable.getOrElse(throw new NoSuchTableException(ident)),
+      existing,
       properties,
       "REPLACE TABLE")
-    stagingCatalog.stageReplace(ident, schema, partitions, newProps)
+    wrapStagedExternalReplaceIfNeeded(
+      ident,
+      "REPLACE TABLE",
+      existing,
+      stagingCatalog.stageReplace(ident, schema, partitions, newProps))
   }
 
   /** Only called for CREATE OR REPLACE TABLE ... [AS SELECT] */
@@ -332,23 +362,41 @@ class UCSingleCatalog
       schema: StructType,
       partitions: Array[Transform],
       properties: util.Map[String, String]): StagedTable = {
-    val (stagingCatalog, existingTable) = prepareManagedDeltaReplaceOrCreateOrReplace(
+    val (stagingCatalog, existingTable) = prepareDeltaReplaceOrCreateOrReplace(
       ident,
       properties,
       "CREATE OR REPLACE TABLE",
       allowMissingTable = true)
-    val newProps = existingTable.map(tableInfo => loadExistingManagedTablePropsForReplace(
-      ident,
-      tableInfo,
-      properties,
-      "CREATE OR REPLACE TABLE")).getOrElse {
-      validateManagedDeltaCreateProperties(properties)
-      stageManagedDeltaTableAndGetProps(ident, properties, createWhenMissing = true)
+    val staged = existingTable.map { tableInfo =>
+      val newProps = loadExistingDeltaTablePropsForReplace(
+        ident,
+        tableInfo,
+        properties,
+        "CREATE OR REPLACE TABLE")
+      wrapStagedExternalReplaceIfNeeded(
+        ident,
+        "CREATE OR REPLACE TABLE",
+        tableInfo,
+        stagingCatalog.stageCreateOrReplace(ident, schema, partitions, newProps))
+    }.getOrElse {
+      val hasExternalClause = properties.containsKey(TableCatalog.PROP_EXTERNAL)
+      val hasLocationClause = properties.containsKey(TableCatalog.PROP_LOCATION)
+      if (hasExternalClause && !hasLocationClause) {
+        throw new ApiException("Cannot create EXTERNAL TABLE without location.")
+      }
+      if (hasLocationClause) {
+        val newProps = prepareExternalTableProperties(properties)
+        stagingCatalog.stageCreateOrReplace(ident, schema, partitions, newProps)
+      } else {
+        validateManagedDeltaCreateProperties(properties)
+        val newProps = stageManagedDeltaTableAndGetProps(ident, properties, createWhenMissing = true)
+        stagingCatalog.stageCreateOrReplace(ident, schema, partitions, newProps)
+      }
     }
-    stagingCatalog.stageCreateOrReplace(ident, schema, partitions, newProps)
+    staged
   }
 
-  private def prepareManagedDeltaReplaceOrCreateOrReplace(
+  private def prepareDeltaReplaceOrCreateOrReplace(
       ident: Identifier,
       properties: util.Map[String, String],
       operation: String,
@@ -357,10 +405,6 @@ class UCSingleCatalog
     val stagingCatalog = delegate match {
       case catalog: StagingTableCatalog => catalog
       case _ => throw new UnsupportedOperationException(s"$operation is not supported")
-    }
-
-    if (!UCSingleCatalog.isManagedDeltaTable(properties, ident)) {
-      throw new UnsupportedOperationException(s"$operation $ucManagedDeltaOnlyMsg")
     }
 
     val fullTableName = UCSingleCatalog.fullTableNameForApi(name(), ident)
@@ -374,6 +418,22 @@ class UCSingleCatalog
       case e: ApiException if e.getCode == 404 => throw new NoSuchTableException(ident)
     }
     (stagingCatalog, existingTable)
+  }
+
+  private def wrapStagedExternalReplaceIfNeeded(
+      ident: Identifier,
+      operation: String,
+      existingTable: TableInfo,
+      stagedTable: StagedTable): StagedTable = {
+    if (existingTable.getTableType != TableType.EXTERNAL) {
+      stagedTable
+    } else {
+      new ExternalDeltaReplaceStagedTable(
+        stagedTable,
+        operation,
+        UCSingleCatalog.fullTableNameForApi(name(), ident),
+        existingTable.getTableId)
+    }
   }
 
   /** Only called for CTAS */
@@ -396,6 +456,47 @@ class UCSingleCatalog
       stagingCatalog.stageCreate(ident, schema, partitions, newProps)
     } else {
       stagingCatalog.stageCreate(ident, schema, partitions, properties)
+    }
+  }
+
+  private class ExternalDeltaReplaceStagedTable(
+      delegateTable: StagedTable,
+      operation: String,
+      fullTableName: String,
+      expectedTableId: String) extends StagedTable with SupportsWrite {
+
+    override def commitStagedChanges(): Unit = {
+      val currentTable = try {
+        tablesApi.getTable(
+          fullTableName,
+          /* readStreamingTableAsManaged = */ false,
+          /* readMaterializedViewAsManaged = */ false)
+      } catch {
+        case e: ApiException if e.getCode == 404 =>
+          throw new ApiException(
+            s"$operation target table changed before commit for $fullTableName: " +
+              s"expected table id $expectedTableId but the table no longer exists")
+      }
+      val currentTableId = currentTable.getTableId
+      if (currentTableId != expectedTableId) {
+        throw new ApiException(
+          s"$operation target table changed before commit for $fullTableName: " +
+            s"expected table id $expectedTableId but found $currentTableId")
+      }
+      delegateTable.commitStagedChanges()
+    }
+
+    override def abortStagedChanges(): Unit = delegateTable.abortStagedChanges()
+    override def name(): String = delegateTable.name()
+    override def schema(): StructType = delegateTable.schema()
+    override def partitioning(): Array[Transform] = delegateTable.partitioning()
+    override def capabilities(): util.Set[TableCapability] = delegateTable.capabilities()
+    override def properties(): util.Map[String, String] = delegateTable.properties()
+
+    override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder = delegateTable match {
+      case supportsWrite: SupportsWrite => supportsWrite.newWriteBuilder(info)
+      case _ => throw new UnsupportedOperationException(
+        s"Staged table $fullTableName does not support writes")
     }
   }
 }
@@ -434,6 +535,10 @@ object UCSingleCatalog {
     val hasLocationClause = properties.containsKey(TableCatalog.PROP_LOCATION)
     val isPathTable = ident.namespace().length == 1 && new Path(ident.name()).isAbsolute
     !hasExternalClause && !hasLocationClause && !isPathTable
+  }
+
+  private def normalizeLocation(location: String): String = {
+    new Path(location).toUri.normalize().toString.stripSuffix("/")
   }
 
   def checkUnsupportedNestedNamespace(namespace: Array[String]): Unit = {

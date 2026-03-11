@@ -14,12 +14,14 @@ import io.unitycatalog.client.api.TablesApi;
 import io.unitycatalog.client.api.TemporaryCredentialsApi;
 import io.unitycatalog.client.model.CreateStagingTable;
 import io.unitycatalog.client.model.DataSourceFormat;
+import io.unitycatalog.client.model.GenerateTemporaryPathCredential;
 import io.unitycatalog.client.model.StagingTableInfo;
 import io.unitycatalog.client.model.TableInfo;
 import io.unitycatalog.client.model.TableType;
 import io.unitycatalog.client.model.TemporaryCredentials;
 import java.lang.reflect.Field;
 import java.net.URI;
+import java.util.HashMap;
 import java.util.Map;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.connector.catalog.Identifier;
@@ -57,6 +59,7 @@ public class UCSingleCatalogStagingTableTest {
           UCTableProperties.DELTA_CATALOG_MANAGED_VALUE);
   private static final Map<String, String> REPLACE_DELTA_PROPS =
       Map.of(TableCatalog.PROP_PROVIDER, "delta");
+  private static final String EXTERNAL_LOCATION = "file:///tmp/uc-external-table";
 
   private UCSingleCatalog catalog;
   private StagingTableCatalog mockDelegate;
@@ -304,6 +307,52 @@ public class UCSingleCatalogStagingTableTest {
   }
 
   @Test
+  public void testStageCreateOrReplaceExistingExternalTablePassesExistingTableHandoff()
+      throws Exception {
+    TablesApi mockTablesApi = mock(TablesApi.class);
+    TemporaryCredentialsApi mockTempCredsApi = mock(TemporaryCredentialsApi.class);
+    StagedTable staged = mock(StagedTable.class);
+    when(mockDelegate.name()).thenReturn("main");
+    when(mockDelegate.stageCreateOrReplace(eq(IDENT), eq(SCHEMA), any(), any())).thenReturn(staged);
+    when(mockTablesApi.getTable(eq("main.schema.table"), eq(false), eq(false)))
+        .thenReturn(
+            new TableInfo()
+                .tableType(TableType.EXTERNAL)
+                .dataSourceFormat(DataSourceFormat.DELTA)
+                .storageLocation(EXTERNAL_LOCATION)
+                .tableId("table-id"));
+    when(mockTempCredsApi.generateTemporaryPathCredentials(any()))
+        .thenReturn(new TemporaryCredentials());
+
+    setField(catalog, "tablesApi", mockTablesApi);
+    setField(catalog, "temporaryCredentialsApi", mockTempCredsApi);
+    setField(catalog, "uri", URI.create("http://localhost"));
+
+    Map<String, String> properties = new HashMap<>();
+    properties.put(TableCatalog.PROP_PROVIDER, "delta");
+    properties.put(TableCatalog.PROP_LOCATION, EXTERNAL_LOCATION);
+
+    StagedTable result = catalog.stageCreateOrReplace(IDENT, SCHEMA, PARTITIONS, properties);
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<String, String>> propsCaptor = ArgumentCaptor.forClass((Class) Map.class);
+    ArgumentCaptor<GenerateTemporaryPathCredential> credCaptor =
+        ArgumentCaptor.forClass(GenerateTemporaryPathCredential.class);
+
+    verify(mockTempCredsApi).generateTemporaryPathCredentials(credCaptor.capture());
+    verify(mockDelegate).stageCreateOrReplace(eq(IDENT), eq(SCHEMA), any(), propsCaptor.capture());
+    assertThat(credCaptor.getValue().getUrl()).isEqualTo(EXTERNAL_LOCATION);
+    assertThat(credCaptor.getValue().getOperation().getValue()).isEqualTo("PATH_READ_WRITE");
+    assertThat(propsCaptor.getValue())
+        .containsEntry(TableCatalog.PROP_LOCATION, EXTERNAL_LOCATION)
+        .containsEntry(EXISTING_TABLE_LOCATION_KEY, EXTERNAL_LOCATION)
+        .containsEntry(EXISTING_TABLE_TYPE_KEY, "EXTERNAL")
+        .containsEntry(EXISTING_TABLE_ID_KEY, "table-id");
+    assertThat(propsCaptor.getValue()).doesNotContainKey(TableCatalog.PROP_IS_MANAGED_LOCATION);
+    assertThat(result).isNotSameAs(staged);
+  }
+
+  @Test
   public void testStageReplaceExistingManagedTablePassesExistingTableHandoff() throws Exception {
     TablesApi mockTablesApi = mock(TablesApi.class);
     TemporaryCredentialsApi mockTempCredsApi = mock(TemporaryCredentialsApi.class);
@@ -347,6 +396,180 @@ public class UCSingleCatalogStagingTableTest {
   }
 
   @Test
+  public void testStageReplaceExistingExternalTablePassesExistingTableHandoff() throws Exception {
+    TablesApi mockTablesApi = mock(TablesApi.class);
+    TemporaryCredentialsApi mockTempCredsApi = mock(TemporaryCredentialsApi.class);
+    StagedTable staged = mock(StagedTable.class);
+    when(mockDelegate.name()).thenReturn("main");
+    when(mockDelegate.stageReplace(eq(IDENT), eq(SCHEMA), any(), any())).thenReturn(staged);
+    when(mockTablesApi.getTable(eq("main.schema.table"), eq(false), eq(false)))
+        .thenReturn(
+            new TableInfo()
+                .tableType(TableType.EXTERNAL)
+                .dataSourceFormat(DataSourceFormat.DELTA)
+                .storageLocation(EXTERNAL_LOCATION)
+                .tableId("table-id"));
+    when(mockTempCredsApi.generateTemporaryPathCredentials(any()))
+        .thenReturn(new TemporaryCredentials());
+
+    setField(catalog, "tablesApi", mockTablesApi);
+    setField(catalog, "temporaryCredentialsApi", mockTempCredsApi);
+    setField(catalog, "uri", URI.create("http://localhost"));
+
+    StagedTable result =
+        catalog.stageReplace(
+            IDENT,
+            SCHEMA,
+            PARTITIONS,
+            Map.of(
+                TableCatalog.PROP_PROVIDER,
+                "delta",
+                TableCatalog.PROP_LOCATION,
+                EXTERNAL_LOCATION));
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<String, String>> propsCaptor = ArgumentCaptor.forClass((Class) Map.class);
+    ArgumentCaptor<GenerateTemporaryPathCredential> credCaptor =
+        ArgumentCaptor.forClass(GenerateTemporaryPathCredential.class);
+
+    verify(mockTempCredsApi).generateTemporaryPathCredentials(credCaptor.capture());
+    verify(mockDelegate).stageReplace(eq(IDENT), eq(SCHEMA), any(), propsCaptor.capture());
+    assertThat(credCaptor.getValue().getUrl()).isEqualTo(EXTERNAL_LOCATION);
+    assertThat(credCaptor.getValue().getOperation().getValue()).isEqualTo("PATH_READ_WRITE");
+    assertThat(propsCaptor.getValue())
+        .containsEntry(TableCatalog.PROP_LOCATION, EXTERNAL_LOCATION)
+        .containsEntry(EXISTING_TABLE_LOCATION_KEY, EXTERNAL_LOCATION)
+        .containsEntry(EXISTING_TABLE_TYPE_KEY, "EXTERNAL")
+        .containsEntry(EXISTING_TABLE_ID_KEY, "table-id");
+
+    result.commitStagedChanges();
+    verify(staged).commitStagedChanges();
+  }
+
+  @Test
+  public void testStageReplaceExistingExternalTableRejectsLocationMismatch() throws Exception {
+    TablesApi mockTablesApi = mock(TablesApi.class);
+    when(mockDelegate.name()).thenReturn("main");
+    when(mockTablesApi.getTable(eq("main.schema.table"), eq(false), eq(false)))
+        .thenReturn(
+            new TableInfo()
+                .tableType(TableType.EXTERNAL)
+                .dataSourceFormat(DataSourceFormat.DELTA)
+                .storageLocation(EXTERNAL_LOCATION)
+                .tableId("table-id"));
+
+    setField(catalog, "tablesApi", mockTablesApi);
+
+    assertThatThrownBy(
+            () ->
+                catalog.stageReplace(
+                    IDENT,
+                    SCHEMA,
+                    PARTITIONS,
+                    Map.of(
+                        TableCatalog.PROP_PROVIDER,
+                        "delta",
+                        TableCatalog.PROP_LOCATION,
+                        "file:///tmp/different")))
+        .isInstanceOf(UnsupportedOperationException.class)
+        .hasMessageContaining("cannot change the registered location");
+  }
+
+  @Test
+  public void testStageCreateOrReplaceMissingExternalTableUsesExternalCreatePath()
+      throws Exception {
+    TablesApi mockTablesApi = mock(TablesApi.class);
+    TemporaryCredentialsApi mockTempCredsApi = mock(TemporaryCredentialsApi.class);
+    StagedTable staged = mock(StagedTable.class);
+    when(mockDelegate.name()).thenReturn("main");
+    when(mockDelegate.stageCreateOrReplace(eq(IDENT), eq(SCHEMA), any(), any())).thenReturn(staged);
+    when(mockTablesApi.getTable(eq("main.schema.table"), eq(false), eq(false)))
+        .thenThrow(new ApiException(404, "not found"));
+    when(mockTempCredsApi.generateTemporaryPathCredentials(any()))
+        .thenReturn(new TemporaryCredentials());
+
+    setField(catalog, "tablesApi", mockTablesApi);
+    setField(catalog, "temporaryCredentialsApi", mockTempCredsApi);
+    setField(catalog, "uri", URI.create("http://localhost"));
+
+    StagedTable result =
+        catalog.stageCreateOrReplace(
+            IDENT,
+            SCHEMA,
+            PARTITIONS,
+            Map.of(
+                TableCatalog.PROP_PROVIDER,
+                "delta",
+                TableCatalog.PROP_EXTERNAL,
+                "true",
+                TableCatalog.PROP_LOCATION,
+                EXTERNAL_LOCATION));
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<String, String>> propsCaptor = ArgumentCaptor.forClass((Class) Map.class);
+    ArgumentCaptor<GenerateTemporaryPathCredential> credCaptor =
+        ArgumentCaptor.forClass(GenerateTemporaryPathCredential.class);
+
+    verify(mockTablesApi, never()).createStagingTable(any(CreateStagingTable.class));
+    verify(mockTempCredsApi).generateTemporaryPathCredentials(credCaptor.capture());
+    verify(mockDelegate).stageCreateOrReplace(eq(IDENT), eq(SCHEMA), any(), propsCaptor.capture());
+    assertThat(credCaptor.getValue().getOperation().getValue()).isEqualTo("PATH_CREATE_TABLE");
+    assertThat(propsCaptor.getValue())
+        .containsEntry(TableCatalog.PROP_LOCATION, EXTERNAL_LOCATION)
+        .doesNotContainKeys(
+            EXISTING_TABLE_LOCATION_KEY,
+            EXISTING_TABLE_TYPE_KEY,
+            EXISTING_TABLE_ID_KEY,
+            CREATE_WHEN_MISSING_KEY);
+    assertThat(result).isSameAs(staged);
+  }
+
+  @Test
+  public void testStageReplaceExistingExternalTableCommitFailsIfTargetTableIdChanges()
+      throws Exception {
+    TablesApi mockTablesApi = mock(TablesApi.class);
+    TemporaryCredentialsApi mockTempCredsApi = mock(TemporaryCredentialsApi.class);
+    StagedTable staged = mock(StagedTable.class);
+    when(mockDelegate.name()).thenReturn("main");
+    when(mockDelegate.stageReplace(eq(IDENT), eq(SCHEMA), any(), any())).thenReturn(staged);
+    when(mockTablesApi.getTable(eq("main.schema.table"), eq(false), eq(false)))
+        .thenReturn(
+            new TableInfo()
+                .tableType(TableType.EXTERNAL)
+                .dataSourceFormat(DataSourceFormat.DELTA)
+                .storageLocation(EXTERNAL_LOCATION)
+                .tableId("staged-id"))
+        .thenReturn(
+            new TableInfo()
+                .tableType(TableType.EXTERNAL)
+                .dataSourceFormat(DataSourceFormat.DELTA)
+                .storageLocation(EXTERNAL_LOCATION)
+                .tableId("new-id"));
+    when(mockTempCredsApi.generateTemporaryPathCredentials(any()))
+        .thenReturn(new TemporaryCredentials());
+
+    setField(catalog, "tablesApi", mockTablesApi);
+    setField(catalog, "temporaryCredentialsApi", mockTempCredsApi);
+    setField(catalog, "uri", URI.create("http://localhost"));
+
+    StagedTable result =
+        catalog.stageReplace(
+            IDENT,
+            SCHEMA,
+            PARTITIONS,
+            Map.of(
+                TableCatalog.PROP_PROVIDER,
+                "delta",
+                TableCatalog.PROP_LOCATION,
+                EXTERNAL_LOCATION));
+
+    assertThatThrownBy(result::commitStagedChanges)
+        .isInstanceOf(ApiException.class)
+        .hasMessageContaining("expected table id staged-id but found new-id");
+    verify(staged, never()).commitStagedChanges();
+  }
+
+  @Test
   public void testStageReplaceMissingManagedTableThrowsNoSuchTable() throws Exception {
     TablesApi mockTablesApi = mock(TablesApi.class);
     when(mockDelegate.name()).thenReturn("main");
@@ -367,7 +590,14 @@ public class UCSingleCatalogStagingTableTest {
 
   private static void setField(UCSingleCatalog catalog, String fieldName, Object value) {
     try {
-      Field f = UCSingleCatalog.class.getDeclaredField(fieldName);
+      Field f =
+          java.util.Arrays.stream(UCSingleCatalog.class.getDeclaredFields())
+              .filter(
+                  field ->
+                      field.getName().equals(fieldName)
+                          || field.getName().endsWith("$$" + fieldName))
+              .findFirst()
+              .orElseThrow(() -> new NoSuchFieldException(fieldName));
       f.setAccessible(true);
       f.set(catalog, value);
     } catch (ReflectiveOperationException e) {
