@@ -5,16 +5,23 @@ import com.fasterxml.jackson.annotation.JsonSetter;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.unitycatalog.server.delta.model.ArrayType;
+import io.unitycatalog.server.delta.model.DecimalType;
 import io.unitycatalog.server.delta.model.DeltaType;
 import io.unitycatalog.server.delta.model.MapType;
 import io.unitycatalog.server.delta.model.StructField;
+import io.unitycatalog.server.delta.model.StructType;
 import io.unitycatalog.server.delta.serde.DeltaTypeModule;
+import io.unitycatalog.server.exception.BaseException;
+import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.model.ColumnInfo;
 import io.unitycatalog.server.model.ColumnTypeName;
 import io.unitycatalog.server.persist.dao.ColumnInfoDAO;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 public class ColumnUtils {
 
@@ -147,6 +154,134 @@ public class ColumnUtils {
     } catch (JsonProcessingException e) {
       throw new IllegalStateException(
           "Failed to serialize typeJson for field " + field.getName(), e);
+    }
+  }
+
+  /**
+   * Convert a Delta REST Catalog {@link StructField} into a UC {@link ColumnInfo}. The reverse of
+   * {@link #toStructField(ColumnInfo)}: {@code typeJson} is the authoritative Spark-format column
+   * spec, {@code typeName} is the top-level ColumnTypeName, and {@code typeText} is the recursive
+   * Spark-style catalog string ({@code array<string>}, {@code struct<name:type>}). Column
+   * comments in {@code metadata.comment} (per Delta spec) are lifted into the dedicated
+   * {@code ColumnInfo.comment} field. Mirrors {@code UCSingleCatalog.createTable}'s per-column
+   * projection so DRC-created tables render identically to Spark-created ones.
+   */
+  public static ColumnInfo toColumnInfo(StructField field, int position) {
+    DeltaType type = field.getType();
+    return new ColumnInfo()
+        .name(field.getName())
+        .nullable(Boolean.TRUE.equals(field.getNullable()))
+        .position(position)
+        .typeJson(toTypeJson(field))
+        .typeName(resolveColumnTypeName(type))
+        .typeText(toCatalogString(type))
+        .comment(extractComment(field));
+  }
+
+  /**
+   * Render a {@link DeltaType} as a Spark-style catalog string -- the same format produced by
+   * {@code org.apache.spark.sql.types.DataType#catalogString}. Primitives go through the shared
+   * {@link #typeNameVsTypeText} override map (so {@code long}→{@code bigint}, {@code
+   * integer}→{@code int}, etc.); decimals include precision/scale; array/map/struct recurse.
+   */
+  public static String toCatalogString(DeltaType type) {
+    if (type instanceof DecimalType d) {
+      return "decimal" + getPrecisionAndScale(d.getPrecision(), d.getScale());
+    }
+    if (type instanceof ArrayType a) {
+      return "array<" + toCatalogString(a.getElementType()) + ">";
+    }
+    if (type instanceof MapType m) {
+      return "map<" + toCatalogString(m.getKeyType()) + "," + toCatalogString(m.getValueType())
+          + ">";
+    }
+    if (type instanceof StructType s) {
+      List<StructField> fields = s.getFields() != null ? s.getFields() : List.of();
+      StringBuilder sb = new StringBuilder("struct<");
+      for (int i = 0; i < fields.size(); i++) {
+        if (i > 0) sb.append(",");
+        StructField f = fields.get(i);
+        sb.append(f.getName()).append(":").append(toCatalogString(f.getType()));
+      }
+      return sb.append(">").toString();
+    }
+    return getTypeText(resolveColumnTypeName(type));
+  }
+
+  private static String extractComment(StructField field) {
+    Map<String, Object> metadata = field.getMetadata();
+    if (metadata == null) return null;
+    Object comment = metadata.get("comment");
+    return comment instanceof String s ? s : null;
+  }
+
+  private static ColumnTypeName resolveColumnTypeName(DeltaType type) {
+    if (type instanceof ArrayType) return ColumnTypeName.ARRAY;
+    if (type instanceof DecimalType) return ColumnTypeName.DECIMAL;
+    if (type instanceof MapType) return ColumnTypeName.MAP;
+    if (type instanceof StructType) return ColumnTypeName.STRUCT;
+    // PrimitiveType: the discriminator string IS the primitive name. Reject with
+    // INVALID_ARGUMENT for anything we can't map -- the server-side ColumnTypeName enum has no
+    // UNKNOWN_DEFAULT_OPEN_API sentinel (OpenAPI generator adds it only for clients). A 400 with
+    // a clear message beats a silent corruption of the stored type.
+    //
+    // Not handled, and why: INTERVAL isn't a Delta primitive at all. CHAR and UDT never reach
+    // the Delta wire in practice -- Spark's Delta writer normalizes CHAR/VARCHAR to STRING (via
+    // CharVarcharUtils) and unwraps UDTs to their underlying sqlType before persisting the
+    // schema, so DRC clients conforming to the Delta protocol never send "char(n)" or a
+    // {"type":"udt",...} structure. TABLE_TYPE is UC-internal (foreign tables) and doesn't
+    // flow over the Delta wire either.
+    String primitive = type.getType();
+    return switch (primitive) {
+      case "boolean" -> ColumnTypeName.BOOLEAN;
+      case "byte" -> ColumnTypeName.BYTE;
+      case "short" -> ColumnTypeName.SHORT;
+      case "integer" -> ColumnTypeName.INT;
+      case "long" -> ColumnTypeName.LONG;
+      case "float" -> ColumnTypeName.FLOAT;
+      case "double" -> ColumnTypeName.DOUBLE;
+      case "date" -> ColumnTypeName.DATE;
+      case "timestamp" -> ColumnTypeName.TIMESTAMP;
+      case "timestamp_ntz" -> ColumnTypeName.TIMESTAMP_NTZ;
+      case "string" -> ColumnTypeName.STRING;
+      case "binary" -> ColumnTypeName.BINARY;
+      case "variant" -> ColumnTypeName.VARIANT;
+      case "null" -> ColumnTypeName.NULL;
+      default ->
+          throw new BaseException(
+              ErrorCode.INVALID_ARGUMENT, "Unsupported Delta primitive type: " + primitive);
+    };
+  }
+
+  /**
+   * Stamp each {@link ColumnInfo} whose name appears in {@code partitionColumns} with its
+   * partition index (the position within {@code partitionColumns}). Throws {@code INVALID_ARGUMENT}
+   * at the first partition-column name that does not match any column in {@code columns}.
+   *
+   * <p>The input {@code columns} list is mutated in place. Designed to be shared between the
+   * Delta REST Catalog create and update/commit paths -- both take a kebab-case {@code
+   * partition-columns} list of names from the wire and project it onto UC's
+   * partition-index-per-column representation (only create is wired up today).
+   *
+   * <p>Runs in {@code O(|columns| + |partitionColumns|)}: builds a name → ColumnInfo lookup once,
+   * then walks {@code partitionColumns} stamping indices and rejecting unknown names inline.
+   */
+  public static void applyPartitionColumns(
+      List<ColumnInfo> columns, List<String> partitionColumns) {
+    if (partitionColumns == null || partitionColumns.isEmpty()) {
+      return;
+    }
+    Map<String, ColumnInfo> columnsByName =
+        columns.stream().collect(Collectors.toMap(ColumnInfo::getName, Function.identity()));
+    for (int i = 0; i < partitionColumns.size(); i++) {
+      String partName = partitionColumns.get(i);
+      ColumnInfo match = columnsByName.get(partName);
+      if (match == null) {
+        throw new BaseException(
+            ErrorCode.INVALID_ARGUMENT,
+            "partition-columns references unknown column: " + partName);
+      }
+      match.setPartitionIndex(i);
     }
   }
 }

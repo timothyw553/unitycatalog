@@ -3,7 +3,8 @@ package io.unitycatalog.server.service.delta;
 /**
  * Delta protocol table-feature identifiers referenced by the Delta REST Catalog surface. These are
  * the spec-defined feature names that appear in {@code protocol.reader-features} and {@code
- * protocol.writer-features}.
+ * protocol.writer-features} and, via {@link DeltaPropertyMapper}, as {@code delta.feature.<name>}
+ * entries on the stored UC property map.
  *
  * <p>Centralising them prevents typos at the points where the server makes feature-specific
  * decisions (e.g. "MANAGED tables must declare catalogManaged") from silently mismatching the
