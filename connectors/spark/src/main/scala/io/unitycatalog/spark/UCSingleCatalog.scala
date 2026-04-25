@@ -40,6 +40,7 @@ class UCSingleCatalog
   private[this] var tokenProvider: TokenProvider = null
   private[this] var renewCredEnabled: Boolean = false
   private[this] var credScopedFsEnabled: Boolean = false
+  private[this] var deltaRestApiEnabled: Boolean = false
   private[this] var apiClient: ApiClient = null;
   private[this] var temporaryCredentialsApi: TemporaryCredentialsApi = null
   private[this] var tablesApi: TablesApi = null
@@ -61,13 +62,16 @@ class UCSingleCatalog
     val serverSidePlanningEnabled = OptionsUtil.getBoolean(options,
       OptionsUtil.SERVER_SIDE_PLANNING_ENABLED,
       OptionsUtil.DEFAULT_SERVER_SIDE_PLANNING_ENABLED)
+    deltaRestApiEnabled = OptionsUtil.getBoolean(options,
+      OptionsUtil.DELTA_REST_API_ENABLED,
+      OptionsUtil.DEFAULT_DELTA_REST_API_ENABLED)
 
     apiClient = ApiClientFactory.createApiClient(
       JitterDelayRetryPolicy.builder().build(),uri, tokenProvider)
     temporaryCredentialsApi = new TemporaryCredentialsApi(apiClient)
     tablesApi = new TablesApi(apiClient)
     val proxy = new UCProxy(uri, tokenProvider, renewCredEnabled, credScopedFsEnabled,
-      serverSidePlanningEnabled, apiClient, tablesApi, temporaryCredentialsApi)
+      serverSidePlanningEnabled, deltaRestApiEnabled, apiClient, tablesApi, temporaryCredentialsApi)
     proxy.initialize(name, options)
     if (UCSingleCatalog.LOAD_DELTA_CATALOG.get()) {
       try {
@@ -112,7 +116,10 @@ class UCSingleCatalog
       throw new ApiException("Cannot create EXTERNAL TABLE without location.")
     }
 
-    if (UCSingleCatalog.isManagedDeltaTable(properties, ident)) {
+    val isManagedDelta = UCSingleCatalog.isManagedDeltaTable(properties, ident)
+    if (deltaRestApiEnabled && isManagedDelta) {
+      delegate.createTable(ident, columns, partitions, properties)
+    } else if (isManagedDelta) {
       validateManagedDeltaCreateProperties(properties)
       val newProps = stageManagedDeltaTableAndGetProps(ident, properties)
       delegate.createTable(ident, columns, partitions, newProps)
@@ -385,8 +392,13 @@ class UCSingleCatalog
         "CREATE OR REPLACE TABLE")
     }.getOrElse {
       // Creating a new table.
-      validateManagedDeltaCreateProperties(properties)
-      stageManagedDeltaTableAndGetProps(ident, properties)
+      val isManagedDelta = UCSingleCatalog.isManagedDeltaTable(properties, ident)
+      if (deltaRestApiEnabled && isManagedDelta) {
+        properties
+      } else {
+        validateManagedDeltaCreateProperties(properties)
+        stageManagedDeltaTableAndGetProps(ident, properties)
+      }
     }
     UCSingleCatalog.requireProviderSpecified("CREATE OR REPLACE TABLE", newProps)
     stagingCatalog.stageCreateOrReplace(ident, schema, partitions, newProps)
@@ -423,7 +435,10 @@ class UCSingleCatalog
       properties: util.Map[String, String]): StagedTable = {
     UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
     val stagingCatalog = requireStagingCatalog("CREATE TABLE AS SELECT (CTAS)")
-    if (UCSingleCatalog.isManagedDeltaTable(properties, ident)) {
+    val isManagedDelta = UCSingleCatalog.isManagedDeltaTable(properties, ident)
+    if (deltaRestApiEnabled && isManagedDelta) {
+      stagingCatalog.stageCreate(ident, schema, partitions, properties)
+    } else if (isManagedDelta) {
       val newProps = stageManagedDeltaTableAndGetProps(ident, properties)
       stagingCatalog.stageCreate(ident, schema, partitions, newProps)
     } else if (properties.containsKey(TableCatalog.PROP_LOCATION)) {
@@ -491,6 +506,11 @@ object UCSingleCatalog {
       operation)
   }
 
+  def isDeltaProvider(properties: util.Map[String, String]): Boolean = {
+    Option(properties.get(TableCatalog.PROP_PROVIDER))
+      .exists(_.equalsIgnoreCase(DataSourceFormat.DELTA.name))
+  }
+
   /**
    * Determines whether a table should be created as a managed table.
    *
@@ -546,6 +566,7 @@ private class UCProxy(
     renewCredEnabled: Boolean,
     credScopedFsEnabled: Boolean,
     serverSidePlanningEnabled: Boolean,
+    deltaRestApiEnabled: Boolean,
     apiClient: ApiClient,
     tablesApi: TablesApi,
     temporaryCredentialsApi: TemporaryCredentialsApi) extends TableCatalog with SupportsNamespaces with Logging {
@@ -599,7 +620,11 @@ private class UCProxy(
     val locationUri = CatalogUtils.stringToURI(t.getStorageLocation)
     val tableId = t.getTableId
     var tableOp = TableOperation.READ_WRITE
-    val temporaryCredentials = {
+    val skipLegacyCredentials =
+      deltaRestApiEnabled && t.getDataSourceFormat == DataSourceFormat.DELTA
+    val temporaryCredentials = if (skipLegacyCredentials) {
+      null
+    } else {
       try {
         temporaryCredentialsApi
           .generateTemporaryTableCredentials(
@@ -626,7 +651,7 @@ private class UCProxy(
       }
     }
 
-    if (serverSidePlanningEnabled && temporaryCredentials == null) {
+    if (!skipLegacyCredentials && serverSidePlanningEnabled && temporaryCredentials == null) {
       enableServerSidePlanningConfig(identifier)
     }
 

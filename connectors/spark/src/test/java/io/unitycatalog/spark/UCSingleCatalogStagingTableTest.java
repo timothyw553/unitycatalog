@@ -12,8 +12,11 @@ import static org.mockito.Mockito.when;
 import io.unitycatalog.client.ApiException;
 import io.unitycatalog.client.api.TablesApi;
 import io.unitycatalog.client.api.TemporaryCredentialsApi;
+import io.unitycatalog.client.model.AwsCredentials;
 import io.unitycatalog.client.model.CreateStagingTable;
 import io.unitycatalog.client.model.DataSourceFormat;
+import io.unitycatalog.client.model.GenerateTemporaryPathCredential;
+import io.unitycatalog.client.model.PathOperation;
 import io.unitycatalog.client.model.StagingTableInfo;
 import io.unitycatalog.client.model.TableInfo;
 import io.unitycatalog.client.model.TableType;
@@ -21,9 +24,11 @@ import io.unitycatalog.client.model.TemporaryCredentials;
 import java.lang.reflect.Field;
 import java.net.URI;
 import java.util.Map;
+import org.apache.spark.sql.connector.catalog.Column;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.StagedTable;
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog;
+import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.types.DataTypes;
@@ -38,6 +43,7 @@ public class UCSingleCatalogStagingTableTest {
 
   private static final Identifier IDENT = Identifier.of(new String[] {"schema"}, "table");
   private static final StructType SCHEMA = new StructType().add("id", DataTypes.IntegerType, false);
+  private static final Column[] COLUMNS = new Column[] {Column.create("id", DataTypes.IntegerType)};
   private static final Transform[] PARTITIONS = new Transform[0];
   // PROP_EXTERNAL bypasses the managed-table path in prepareTableProperties.
   private static final Map<String, String> PROPS = Map.of(TableCatalog.PROP_EXTERNAL, "true");
@@ -53,6 +59,8 @@ public class UCSingleCatalogStagingTableTest {
           "delta",
           UCTableProperties.DELTA_CATALOG_MANAGED_KEY_NEW,
           "disabled");
+  private static final Map<String, String> EXTERNAL_DELTA_PROPS =
+      Map.of(TableCatalog.PROP_PROVIDER, "delta", TableCatalog.PROP_LOCATION, "s3://bucket/table");
   private static final Map<String, String> REPLACE_DELTA_PROPS =
       Map.of(TableCatalog.PROP_PROVIDER, "delta");
   private static final String EXTERNAL_LOCATION = "file:///tmp/uc-external-table";
@@ -83,6 +91,118 @@ public class UCSingleCatalogStagingTableTest {
 
     verify(mockDelegate).stageCreate(eq(IDENT), eq(SCHEMA), any(), any());
     assertThat(result).isSameAs(staged);
+  }
+
+  @Test
+  public void testStageCreateWithDeltaRestApiEnabledSkipsLegacyCredentialInjection()
+      throws Exception {
+    StagedTable staged = mock(StagedTable.class);
+    TablesApi tablesApi = mock(TablesApi.class);
+    TemporaryCredentialsApi tempCredsApi = mock(TemporaryCredentialsApi.class);
+    when(mockDelegate.stageCreate(eq(IDENT), eq(SCHEMA), any(), any())).thenReturn(staged);
+    setField(catalog, "deltaRestApiEnabled", true);
+    setField(catalog, "tablesApi", tablesApi);
+    setTemporaryCredentialsApi(tempCredsApi);
+
+    StagedTable result = catalog.stageCreate(IDENT, SCHEMA, PARTITIONS, MANAGED_DELTA_PROPS);
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<String, String>> propsCaptor = ArgumentCaptor.forClass((Class) Map.class);
+
+    verify(tablesApi, never()).createStagingTable(any(CreateStagingTable.class));
+    verify(tempCredsApi, never()).generateTemporaryTableCredentials(any());
+    verify(mockDelegate).stageCreate(eq(IDENT), eq(SCHEMA), any(), propsCaptor.capture());
+    assertThat(propsCaptor.getValue())
+        .containsAllEntriesOf(MANAGED_DELTA_PROPS)
+        .doesNotContainKey(TableCatalog.PROP_LOCATION)
+        .doesNotContainKey(TableCatalog.PROP_IS_MANAGED_LOCATION)
+        .doesNotContainKey(UCTableProperties.UC_TABLE_ID_KEY);
+    assertThat(result).isSameAs(staged);
+  }
+
+  @Test
+  public void testCreateTableWithDeltaRestApiEnabledSkipsLegacyCredentialInjection()
+      throws Exception {
+    Table table = mock(Table.class);
+    TablesApi tablesApi = mock(TablesApi.class);
+    TemporaryCredentialsApi tempCredsApi = mock(TemporaryCredentialsApi.class);
+    when(mockDelegate.createTable(eq(IDENT), eq(COLUMNS), any(), any())).thenReturn(table);
+    setField(catalog, "deltaRestApiEnabled", true);
+    setField(catalog, "tablesApi", tablesApi);
+    setTemporaryCredentialsApi(tempCredsApi);
+
+    Table result = catalog.createTable(IDENT, COLUMNS, PARTITIONS, MANAGED_DELTA_PROPS);
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<String, String>> propsCaptor = ArgumentCaptor.forClass((Class) Map.class);
+
+    verify(tablesApi, never()).createStagingTable(any(CreateStagingTable.class));
+    verify(tempCredsApi, never()).generateTemporaryTableCredentials(any());
+    verify(mockDelegate).createTable(eq(IDENT), eq(COLUMNS), any(), propsCaptor.capture());
+    assertThat(propsCaptor.getValue())
+        .containsAllEntriesOf(MANAGED_DELTA_PROPS)
+        .doesNotContainKey(TableCatalog.PROP_LOCATION)
+        .doesNotContainKey(TableCatalog.PROP_IS_MANAGED_LOCATION)
+        .doesNotContainKey(UCTableProperties.UC_TABLE_ID_KEY);
+    assertThat(result).isSameAs(table);
+  }
+
+  @Test
+  public void testStageCreateExternalDeltaWithDeltaRestApiEnabledUsesPathCredentials()
+      throws Exception {
+    StagedTable staged = mock(StagedTable.class);
+    TablesApi tablesApi = mock(TablesApi.class);
+    TemporaryCredentialsApi tempCredsApi = mock(TemporaryCredentialsApi.class);
+    when(mockDelegate.stageCreate(eq(IDENT), eq(SCHEMA), any(), any())).thenReturn(staged);
+    setField(catalog, "deltaRestApiEnabled", true);
+    setField(catalog, "tablesApi", tablesApi);
+    setTemporaryCredentialsApi(tempCredsApi);
+
+    StagedTable result = catalog.stageCreate(IDENT, SCHEMA, PARTITIONS, EXTERNAL_DELTA_PROPS);
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<String, String>> propsCaptor = ArgumentCaptor.forClass((Class) Map.class);
+    ArgumentCaptor<GenerateTemporaryPathCredential> pathCredCaptor =
+        ArgumentCaptor.forClass(GenerateTemporaryPathCredential.class);
+
+    verify(tablesApi, never()).createStagingTable(any(CreateStagingTable.class));
+    verify(tempCredsApi).generateTemporaryPathCredentials(pathCredCaptor.capture());
+    verify(mockDelegate).stageCreate(eq(IDENT), eq(SCHEMA), any(), propsCaptor.capture());
+    assertThat(pathCredCaptor.getValue().getUrl()).isEqualTo("s3://bucket/table");
+    assertThat(pathCredCaptor.getValue().getOperation()).isEqualTo(PathOperation.PATH_CREATE_TABLE);
+    assertThat(propsCaptor.getValue())
+        .containsAllEntriesOf(EXTERNAL_DELTA_PROPS)
+        .containsEntry("fs.s3a.access.key", "fakeAccessKey");
+    assertThat(result).isSameAs(staged);
+  }
+
+  @Test
+  public void testCreateTableExternalDeltaWithDeltaRestApiEnabledUsesPathCredentials()
+      throws Exception {
+    Table table = mock(Table.class);
+    TablesApi tablesApi = mock(TablesApi.class);
+    TemporaryCredentialsApi tempCredsApi = mock(TemporaryCredentialsApi.class);
+    when(mockDelegate.createTable(eq(IDENT), eq(COLUMNS), any(), any())).thenReturn(table);
+    setField(catalog, "deltaRestApiEnabled", true);
+    setField(catalog, "tablesApi", tablesApi);
+    setTemporaryCredentialsApi(tempCredsApi);
+
+    Table result = catalog.createTable(IDENT, COLUMNS, PARTITIONS, EXTERNAL_DELTA_PROPS);
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<String, String>> propsCaptor = ArgumentCaptor.forClass((Class) Map.class);
+    ArgumentCaptor<GenerateTemporaryPathCredential> pathCredCaptor =
+        ArgumentCaptor.forClass(GenerateTemporaryPathCredential.class);
+
+    verify(tablesApi, never()).createStagingTable(any(CreateStagingTable.class));
+    verify(tempCredsApi).generateTemporaryPathCredentials(pathCredCaptor.capture());
+    verify(mockDelegate).createTable(eq(IDENT), eq(COLUMNS), any(), propsCaptor.capture());
+    assertThat(pathCredCaptor.getValue().getUrl()).isEqualTo("s3://bucket/table");
+    assertThat(pathCredCaptor.getValue().getOperation()).isEqualTo(PathOperation.PATH_CREATE_TABLE);
+    assertThat(propsCaptor.getValue())
+        .containsAllEntriesOf(EXTERNAL_DELTA_PROPS)
+        .containsEntry("fs.s3a.access.key", "fakeAccessKey");
+    assertThat(result).isSameAs(table);
   }
 
   @Test
@@ -117,6 +237,34 @@ public class UCSingleCatalogStagingTableTest {
     } finally {
       UCSingleCatalog.LOAD_DELTA_CATALOG().set(true);
     }
+  }
+
+  @Test
+  public void testStageCreateOrReplaceMissingManagedTableWithDeltaRestApiEnabledSkipsLegacyStaging()
+      throws Exception {
+    ManagedReplaceMocks mocks = new ManagedReplaceMocks();
+    mockMissingTableLookup(mocks.tablesApi);
+    when(mockDelegate.stageCreateOrReplace(eq(IDENT), eq(SCHEMA), any(), any()))
+        .thenReturn(mocks.staged);
+    setField(catalog, "deltaRestApiEnabled", true);
+    setTemporaryCredentialsApi(mocks.tempCredsApi);
+
+    StagedTable result =
+        catalog.stageCreateOrReplace(
+            IDENT, SCHEMA, PARTITIONS, Map.of(TableCatalog.PROP_PROVIDER, "delta"));
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<String, String>> propsCaptor = ArgumentCaptor.forClass((Class) Map.class);
+
+    verify(mocks.tablesApi, never()).createStagingTable(any(CreateStagingTable.class));
+    verify(mocks.tempCredsApi, never()).generateTemporaryTableCredentials(any());
+    verify(mockDelegate).stageCreateOrReplace(eq(IDENT), eq(SCHEMA), any(), propsCaptor.capture());
+    assertThat(propsCaptor.getValue())
+        .containsEntry(TableCatalog.PROP_PROVIDER, "delta")
+        .doesNotContainKey(TableCatalog.PROP_LOCATION)
+        .doesNotContainKey(TableCatalog.PROP_IS_MANAGED_LOCATION)
+        .doesNotContainKey(UCTableProperties.UC_TABLE_ID_KEY);
+    assertThat(result).isSameAs(mocks.staged);
   }
 
   @Test
@@ -440,6 +588,14 @@ public class UCSingleCatalogStagingTableTest {
   private void setTemporaryCredentialsApi(TemporaryCredentialsApi tempCredsApi) throws Exception {
     when(tempCredsApi.generateTemporaryTableCredentials(any()))
         .thenReturn(new TemporaryCredentials());
+    when(tempCredsApi.generateTemporaryPathCredentials(any()))
+        .thenReturn(
+            new TemporaryCredentials()
+                .awsTempCredentials(
+                    new AwsCredentials()
+                        .accessKeyId("fakeAccessKey")
+                        .secretAccessKey("fakeSecretKey")
+                        .sessionToken("fakeSessionToken")));
     setField(catalog, "temporaryCredentialsApi", tempCredsApi);
     setField(catalog, "uri", URI.create("http://localhost"));
   }
