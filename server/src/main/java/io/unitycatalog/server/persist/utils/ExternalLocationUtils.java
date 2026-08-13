@@ -16,6 +16,7 @@ import io.unitycatalog.server.persist.dao.VolumeInfoDAO;
 import io.unitycatalog.server.utils.Constants;
 import io.unitycatalog.server.utils.NormalizedURL;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -107,15 +108,18 @@ public class ExternalLocationUtils {
    *   <li>If the URL is a parent path of one or more securable, we can not figure out the actual
    *       owner but have to deny the access
    *   <li>If the URL is under or the same path of any data securable, we'll figure out the UUID of
-   *       that data securable along with its catalog and schema UUIDs and return the result.
+   *       that data securable along with its catalog and schema UUIDs. If an external location
+   *       covers the path, its UUID is included too so callers can enforce both object and external
+   *       location permissions.
    *   <li>If the URL is not owned by any data securable but only by external locations, return UUID
    *       of that external location.
    *   <li>Lastly if no securable is found, return empty map.
    * </ul>
    *
    * @param url the input URL to search securables for
-   * @return A map of SecurableType->UUID. For external location, this will be a 1-entry map. For
-   *     data securables, this will be a 3-entry map.
+   * @return A map of SecurableType->UUID. For an external-location-only path, this will be a
+   *     1-entry map. For data securables, this contains the catalog, schema, data securable, and,
+   *     when one covers the path, the external location.
    */
   public Map<SecurableType, UUID> getMapResourceIdsForPath(NormalizedURL url) {
     return TransactionManager.executeWithTransaction(
@@ -140,16 +144,23 @@ public class ExternalLocationUtils {
           ErrorCode.PERMISSION_DENIED, "Input path '" + url + "' overlaps with other entities.");
     }
 
-    // 2. If it's under only one data securable, use that securable as resource id
-    Optional<Map<SecurableType, UUID>> result =
+    // Resolve the covering external location independently. External clients need its explicit
+    // external-use privilege even when a table or volume is the more specific path owner.
+    Optional<Map<SecurableType, UUID>> externalLocationResult =
+        getResourceIdOfOwnerEntity(session, url, List.of(SecurableType.EXTERNAL_LOCATION));
+
+    // 2. If it's under only one data securable, use that securable as the primary resource and
+    // include the covering external location when present.
+    Optional<Map<SecurableType, UUID>> dataSecurableResult =
         getResourceIdOfOwnerEntity(session, url, DATA_SECURABLE_TYPES);
-    if (result.isPresent()) {
-      return result.get();
+    if (dataSecurableResult.isPresent()) {
+      Map<SecurableType, UUID> resourceIds = new HashMap<>(dataSecurableResult.get());
+      externalLocationResult.ifPresent(resourceIds::putAll);
+      return Map.copyOf(resourceIds);
     }
 
     // 3. If it's under only one external location, use that external location as resource id
-    return getResourceIdOfOwnerEntity(session, url, List.of(SecurableType.EXTERNAL_LOCATION))
-        .orElse(Map.of());
+    return externalLocationResult.orElse(Map.of());
   }
 
   private Optional<Map<SecurableType, UUID>> getResourceIdOfOwnerEntity(

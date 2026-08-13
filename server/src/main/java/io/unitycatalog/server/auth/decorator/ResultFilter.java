@@ -1,6 +1,8 @@
 package io.unitycatalog.server.auth.decorator;
 
 import io.unitycatalog.server.auth.annotation.ResponseAuthorizeFilter;
+import io.unitycatalog.server.exception.BaseException;
+import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.model.CatalogInfo;
 import io.unitycatalog.server.model.CredentialInfo;
 import io.unitycatalog.server.model.ExternalLocationInfo;
@@ -10,6 +12,7 @@ import io.unitycatalog.server.model.SchemaInfo;
 import io.unitycatalog.server.model.SecurableType;
 import io.unitycatalog.server.model.TableInfo;
 import io.unitycatalog.server.model.VolumeInfo;
+import io.unitycatalog.server.persist.model.Privileges;
 
 import java.util.HashMap;
 import java.util.List;
@@ -26,13 +29,12 @@ import static io.unitycatalog.server.model.SecurableType.REGISTERED_MODEL;
 import static io.unitycatalog.server.model.SecurableType.SCHEMA;
 
 /**
- * Filters list responses based on user authorization permissions.
+ * Filters response objects based on user authorization permissions.
  *
- * <p>This class is used in the authorization decorator layer to filter LIST operation results. When
- * a service method is annotated with {@code @ResponseAuthorizeFilter}, the {@link
+ * <p>This class is used in the authorization decorator layer to filter service responses. When a
+ * service method is annotated with {@code @ResponseAuthorizeFilter}, the {@link
  * UnityAccessDecorator} creates a ResultFilter instance and stores it in the request context. The
- * service method then retrieves this filter and calls it to remove items that the user is not
- * authorized to access.
+ * service method then retrieves this filter and applies it to a list or single response object.
  *
  * <p><b>How It Works:</b>
  *
@@ -41,8 +43,8 @@ import static io.unitycatalog.server.model.SecurableType.SCHEMA;
  *       (principal ID, expression, resource IDs) from method annotations
  *   <li>It creates a ResultFilter with these parameters and stores it in the request context
  *   <li>The service method retrieves the filter via {@code applyResponseFilter()} and applies it to
- *       the response list
- *   <li>The filter evaluates authorization for each item and removes unauthorized items
+ *       the response
+ *   <li>The filter returns full objects, projects browse-only metadata, and removes hidden items
  * </ol>
  *
  * <p><b>Resource ID Resolution:</b><br>
@@ -62,6 +64,14 @@ import static io.unitycatalog.server.model.SecurableType.SCHEMA;
  */
 public class ResultFilter {
   private static final Logger LOGGER = LoggerFactory.getLogger(ResultFilter.class);
+  private static final String INCLUDE_BROWSE = "include_browse";
+  private static final String ACCESS_DENIED = "Access denied.";
+
+  private enum AccessLevel {
+    FULL,
+    BROWSE_ONLY,
+    HIDDEN
+  }
 
   private final UUID principalId;
   private final String expression;
@@ -87,29 +97,7 @@ public class ResultFilter {
     this.called = new AtomicBoolean(false);
   }
 
-  /**
-   * Filters a list of resources based on the user's authorization permissions.
-   *
-   * <p>This method evaluates the authorization expression for each item in the list and removes
-   * items that the user is not authorized to access. For each item, it:
-   *
-   * <ol>
-   *   <li>Resolves the item's resource ID (e.g., table ID, volume ID)
-   *   <li>Resolves parent (catalog and schema) resource IDs if it's registered model
-   *   <li>Evaluates the authorization expression with all resolved and provided IDs
-   *   <li>Removes the item if the expression evaluates to false
-   * </ol>
-   *
-   * <p>If an error occurs during authorization evaluation for an item, that item is filtered out
-   * (removed from the list) as a security precaution.
-   *
-   * @param securableType The type of resources being filtered (TABLE, VOLUME, FUNCTION, etc.)
-   * @param items The list of items to filter in-place. This list is modified by removing
-   *     unauthorized items.
-   * @param <T> The type of items in the list (e.g., TableInfo, VolumeInfo)
-   * @throws RuntimeException if the securableType is already resolved in the pre-resolved IDs,
-   *     which indicates a programming error
-   */
+  /** Filters a list in place, retaining full objects and projected browse-only objects. */
   public <T> void filter(SecurableType securableType, List<T> items) {
     called.set(true);
 
@@ -123,27 +111,99 @@ public class ResultFilter {
       throw new RuntimeException("Securable type " + securableType + " is already resolved");
     }
 
-    items.removeIf(
-        item -> {
-          try {
-            // Resolve the item's resource ID and any parent resource IDs to make a complete
-            // collection of all needed resource IDs for this item.
-            Map<SecurableType, UUID> resourceIdsForItem =
-                resolveResourceIdsForItem(securableType, item, resourceIds);
-            boolean authorized =
-                evaluator.evaluate(principalId, expression, resourceIdsForItem, nonResourceValues);
-            if (!authorized) {
-              LOGGER.debug("Item filtered out: {}", item.getClass().getSimpleName());
-            }
-            return !authorized;
-          } catch (Exception e) {
-            LOGGER.warn(
-                "Error evaluating authorization for item, filtering out: {}", e.getMessage());
-            return true;
-          }
-        });
+    items.removeIf(item -> accessLevel(securableType, item) == AccessLevel.HIDDEN);
 
     LOGGER.debug("After filtering: {} items remain", items.size());
+  }
+
+  /**
+   * Applies the same authorization and browse projection as list filtering to one object.
+   *
+   * <p>This supports GET operations, whose resource ID is normally already resolved by the request
+   * decorator. A mismatch between that ID and the returned object's ID fails closed.
+   */
+  public <T> T filterSingle(SecurableType securableType, T item) {
+    called.set(true);
+    if (item == null || accessLevel(securableType, item) == AccessLevel.HIDDEN) {
+      throw new BaseException(ErrorCode.PERMISSION_DENIED, ACCESS_DENIED);
+    }
+    return item;
+  }
+
+  private AccessLevel accessLevel(SecurableType securableType, Object item) {
+    try {
+      Map<SecurableType, UUID> resourceIdsForItem =
+          resolveResourceIdsForItem(securableType, item, resourceIds);
+      if (evaluator.evaluate(principalId, expression, resourceIdsForItem, nonResourceValues)) {
+        setBrowseOnly(securableType, item, false);
+        return AccessLevel.FULL;
+      }
+
+      UUID resourceId = resourceIdsForItem.get(securableType);
+      if (includeBrowse()
+          && supportsBrowse(securableType)
+          && evaluator.authorize(principalId, resourceId, Privileges.BROWSE)) {
+        setBrowseOnly(securableType, item, true);
+        return AccessLevel.BROWSE_ONLY;
+      }
+
+      LOGGER.debug("Item filtered out: {}", item.getClass().getSimpleName());
+      return AccessLevel.HIDDEN;
+    } catch (Exception e) {
+      LOGGER.warn("Error evaluating authorization for item, filtering out: {}", e.getMessage());
+      return AccessLevel.HIDDEN;
+    }
+  }
+
+  private boolean includeBrowse() {
+    Object value = nonResourceValues.get(INCLUDE_BROWSE);
+    return value instanceof Boolean
+        ? (Boolean) value
+        : value instanceof String && Boolean.parseBoolean((String) value);
+  }
+
+  private boolean supportsBrowse(SecurableType securableType) {
+    return switch (securableType) {
+      case CATALOG, SCHEMA, TABLE, FUNCTION, VOLUME, REGISTERED_MODEL, EXTERNAL_LOCATION -> true;
+      default -> false;
+    };
+  }
+
+  private void setBrowseOnly(SecurableType securableType, Object item, boolean browseOnly) {
+    switch (securableType) {
+      case CATALOG -> ((CatalogInfo) item).setBrowseOnly(browseOnly);
+      case SCHEMA -> ((SchemaInfo) item).setBrowseOnly(browseOnly);
+      case TABLE -> {
+        TableInfo table = (TableInfo) item;
+        table.setBrowseOnly(browseOnly);
+        if (browseOnly) {
+          table.setStorageLocation(null);
+          table.setProperties(null);
+          table.setViewDefinition(null);
+          table.setViewDependencies(null);
+        }
+      }
+      case FUNCTION -> {
+        FunctionInfo function = (FunctionInfo) item;
+        function.setBrowseOnly(browseOnly);
+        if (browseOnly) {
+          function.setRoutineDefinition(null);
+        }
+      }
+      case VOLUME -> ((VolumeInfo) item).setBrowseOnly(browseOnly);
+      case REGISTERED_MODEL -> ((RegisteredModelInfo) item).setBrowseOnly(browseOnly);
+      case EXTERNAL_LOCATION -> {
+        ExternalLocationInfo externalLocation = (ExternalLocationInfo) item;
+        externalLocation.setBrowseOnly(browseOnly);
+        if (browseOnly) {
+          externalLocation.setCredentialName(null);
+          externalLocation.setCredentialId(null);
+        }
+      }
+      default -> {
+        // Other securables do not expose browse-only metadata.
+      }
+    }
   }
 
   private Map<SecurableType, UUID> resolveResourceIdsForItem(
@@ -151,6 +211,10 @@ public class ResultFilter {
     // First, resolve the item's own resource ID
     UUID itemId = resolveResourceId(securableType, item);
     Map<SecurableType, UUID> combined = new HashMap<>(preResolvedIds);
+    UUID preResolvedItemId = preResolvedIds.get(securableType);
+    if (preResolvedItemId != null && !preResolvedItemId.equals(itemId)) {
+      throw new IllegalArgumentException("Returned resource does not match the requested resource");
+    }
     combined.put(securableType, itemId);
     // For REGISTERED_MODEL, resolve catalog and schema if both are not present.
     if (securableType == REGISTERED_MODEL
@@ -189,7 +253,8 @@ public class ResultFilter {
    * security enforcement mechanism to prevent data leakage when developers forget to filter
    * results.
    *
-   * @return true if {@link #filter} has been called at least once, false otherwise
+   * @return true if {@link #filter} or {@link #filterSingle} has been called at least once, false
+   *     otherwise
    */
   public boolean wasCalled() {
     return called.get();

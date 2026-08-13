@@ -22,6 +22,7 @@ import java.util.Set;
 import java.util.UUID;
 
 import static io.unitycatalog.server.model.SecurableType.TABLE;
+import static io.unitycatalog.server.model.SecurableType.METASTORE;
 import static io.unitycatalog.server.service.credential.CredentialContext.Privilege.SELECT;
 import static io.unitycatalog.server.service.credential.CredentialContext.Privilege.UPDATE;
 
@@ -41,6 +42,7 @@ public class TemporaryTableCredentialsService {
 
   @Post("")
   @AuthorizeExpression(AuthorizeExpressions.VEND_TABLE_CREDENTIAL)
+  @AuthorizeResourceKey(METASTORE)
   public HttpResponse generateTemporaryTableCredential(
       @AuthorizeResourceKey(value = TABLE, key = "table_id")
       @AuthorizeKey(key = "operation")

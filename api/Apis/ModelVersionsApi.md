@@ -98,7 +98,7 @@ No authorization required
 
 <a name="getModelVersion"></a>
 # **getModelVersion**
-> ModelVersionInfo getModelVersion(full\_name, version)
+> ModelVersionInfo getModelVersion(full\_name, version, include\_browse)
 
 Get a model version
 
@@ -110,6 +110,7 @@ Get a model version
 |------------- | ------------- | ------------- | -------------|
 | **full\_name** | **String**| Full name of the model. | [default to null] |
 | **version** | **Long**| Version number of the model version. | [default to null] |
+| **include\_browse** | **Boolean**| Whether to allow access through BROWSE on the registered model. | [optional] [default to null] |
 
 ### Return type
 
@@ -126,7 +127,7 @@ No authorization required
 
 <a name="listModelVersions"></a>
 # **listModelVersions**
-> ListModelVersionsResponse listModelVersions(full\_name, max\_results, page\_token)
+> ListModelVersionsResponse listModelVersions(full\_name, max\_results, page\_token, include\_browse)
 
 List model versions of the specified registered model.
 
@@ -139,6 +140,7 @@ List model versions of the specified registered model.
 | **full\_name** | **String**| Full name of the registered model. | [default to null] |
 | **max\_results** | **Integer**| Maximum number of model versions to return. - when set to a value greater than 0, the page length is the minimum of this value and a server configured value; - when set to 0, the page length is set to a server configured value; - when set to a value less than 0, an invalid parameter error is returned;  | [optional] [default to null] |
 | **page\_token** | **String**| Opaque token to send for the next page of results (pagination). | [optional] [default to null] |
+| **include\_browse** | **Boolean**| Whether to allow access through BROWSE on the registered model. | [optional] [default to null] |
 
 ### Return type
 

@@ -99,14 +99,27 @@ public abstract class AuthorizedService {
    */
   protected <T> void applyResponseFilter(SecurableType securableType, List<T> items) {
     if (serverProperties.isAuthorizationEnabled()) {
-      ResultFilter resultFilter =
-          ServiceRequestContext.current().attr(UnityAccessDecorator.RESULT_FILTER_ATTR);
-      if (resultFilter == null) {
-        throw new BaseException(
-            ErrorCode.INTERNAL,
-            "Authorization filter not initialized — ensure the request goes through UnityAccessDecorator.");
-      }
-      resultFilter.filter(securableType, items);
+      getResponseFilter().filter(securableType, items);
     }
+  }
+
+  /** Applies response authorization to a single resource and returns its safe representation. */
+  protected <T> T applyResponseFilter(SecurableType securableType, T item) {
+    if (!serverProperties.isAuthorizationEnabled()) {
+      return item;
+    }
+    return getResponseFilter().filterSingle(securableType, item);
+  }
+
+  private ResultFilter getResponseFilter() {
+    ResultFilter resultFilter =
+        ServiceRequestContext.current().attr(UnityAccessDecorator.RESULT_FILTER_ATTR);
+    if (resultFilter == null) {
+      throw new BaseException(
+          ErrorCode.INTERNAL,
+          "Authorization filter not initialized — ensure the request goes through"
+              + " UnityAccessDecorator.");
+    }
+    return resultFilter;
   }
 }

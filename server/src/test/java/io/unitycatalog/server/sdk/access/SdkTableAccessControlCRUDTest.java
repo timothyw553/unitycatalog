@@ -1,5 +1,6 @@
 package io.unitycatalog.server.sdk.access;
 
+import static io.unitycatalog.server.utils.TestUtils.assertApiException;
 import static io.unitycatalog.server.utils.TestUtils.assertApiExceptionStatusOnly;
 import static io.unitycatalog.server.utils.TestUtils.assertPermissionDenied;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -27,6 +28,7 @@ import io.unitycatalog.client.model.SecurableType;
 import io.unitycatalog.client.model.TableInfo;
 import io.unitycatalog.client.model.TableType;
 import io.unitycatalog.server.base.ServerConfig;
+import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.persist.model.Privileges;
 import io.unitycatalog.server.utils.TestUtils;
 import java.util.List;
@@ -55,6 +57,9 @@ public class SdkTableAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest 
   public void testTableAccess() {
     createCommonTestUsers();
     setupCommonCatalogAndSchema();
+    String externalLocationName = "table_access_location";
+    createExternalLocationWithCredential(
+        "table_access_credential", externalLocationName, testDirectoryRoot.toUri().toString());
 
     // Create API clients for different users
     ServerConfig principal1Config = createTestUserServerConfig(PRINCIPAL_1);
@@ -84,7 +89,18 @@ public class SdkTableAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest 
 
     // Grant USE CATALOG and USE SCHEMA to principal-1
     grantPermissions(PRINCIPAL_1, SecurableType.CATALOG, "cat_pr1", Privileges.USE_CATALOG);
-    grantPermissions(PRINCIPAL_1, SecurableType.SCHEMA, "cat_pr1.sch_pr1", Privileges.USE_SCHEMA);
+    grantPermissions(
+        PRINCIPAL_1,
+        SecurableType.SCHEMA,
+        "cat_pr1.sch_pr1",
+        Privileges.USE_SCHEMA,
+        Privileges.EXTERNAL_USE_SCHEMA);
+    grantPermissions(
+        PRINCIPAL_1,
+        SecurableType.EXTERNAL_LOCATION,
+        externalLocationName,
+        Privileges.CREATE_EXTERNAL_TABLE,
+        Privileges.EXTERNAL_USE_LOCATION);
 
     // Grant USE CATALOG and CREATE SCHEMA to regular-1
     grantPermissions(REGULAR_1, SecurableType.CATALOG, "cat_pr1", Privileges.USE_CATALOG);
@@ -97,7 +113,7 @@ public class SdkTableAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest 
             .catalogName("cat_pr1")
             .schemaName("sch_pr1")
             .columns(TEST_COLUMNS)
-            .storageLocation("/tmp/tbl_pr1")
+            .storageLocation(testDirectoryRoot.resolve("tbl_pr1").toString())
             .tableType(TableType.EXTERNAL)
             .dataSourceFormat(DataSourceFormat.DELTA);
     TableInfo table1Info = principal1TablesApi.createTable(createTable1);
@@ -107,6 +123,12 @@ public class SdkTableAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest 
     // Grant USE CATALOG and USE SCHEMA to regular-1
     grantPermissions(REGULAR_1, SecurableType.CATALOG, "cat_pr1", Privileges.USE_CATALOG);
     grantPermissions(REGULAR_1, SecurableType.SCHEMA, "cat_pr1.sch_pr1", Privileges.USE_SCHEMA);
+    grantPermissions(
+        REGULAR_1,
+        SecurableType.EXTERNAL_LOCATION,
+        externalLocationName,
+        Privileges.CREATE_EXTERNAL_TABLE,
+        Privileges.EXTERNAL_USE_LOCATION);
 
     // TEST: Create table as regular-1 (not owner, no CREATE TABLE) - should fail
     CreateTable createTableRg1 =
@@ -115,13 +137,18 @@ public class SdkTableAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest 
             .catalogName("cat_pr1")
             .schemaName("sch_pr1")
             .columns(TEST_COLUMNS)
-            .storageLocation("/tmp/tab_rg1")
+            .storageLocation(testDirectoryRoot.resolve("tab_rg1").toString())
             .tableType(TableType.EXTERNAL)
             .dataSourceFormat(DataSourceFormat.DELTA);
     assertPermissionDenied(() -> regular1TablesApi.createTable(createTableRg1));
 
     // grant CREATE TABLE permission to regular-1
-    grantPermissions(REGULAR_1, SecurableType.SCHEMA, "cat_pr1.sch_pr1", Privileges.CREATE_TABLE);
+    grantPermissions(
+        REGULAR_1,
+        SecurableType.SCHEMA,
+        "cat_pr1.sch_pr1",
+        Privileges.CREATE_TABLE,
+        Privileges.EXTERNAL_USE_SCHEMA);
 
     // create table (regular-1) -> not owner, use catalog, USE SCHEMA, create table -> allowed
     TableInfo tableRg1Info = regular1TablesApi.createTable(createTableRg1);
@@ -153,6 +180,29 @@ public class SdkTableAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest 
     List<TableInfo> regular1Tables = listAllTables(regular1TablesApi, "cat_pr1", "sch_pr1");
     assertThat(regular1Tables).hasSize(1);
     assertThat(regular1Tables.get(0).getName()).isEqualTo("tab_rg1");
+
+    // MODIFY is a data-write privilege, not permission to read full table metadata.
+    grantPermissions(REGULAR_1, SecurableType.TABLE, "cat_pr1.sch_pr1.tbl_pr1", Privileges.MODIFY);
+    assertPermissionDenied(() -> getTable(regular1TablesApi, "cat_pr1.sch_pr1.tbl_pr1"));
+
+    // Catalog BROWSE makes the table discoverable only when requested and redacts sensitive
+    // metadata instead of upgrading MODIFY into full metadata access.
+    grantPermissions(REGULAR_1, SecurableType.CATALOG, "cat_pr1", Privileges.BROWSE);
+    TableInfo browsedTable =
+        regular1TablesApi.getTable("cat_pr1.sch_pr1.tbl_pr1", true, false, true);
+    assertThat(browsedTable.getBrowseOnly()).isTrue();
+    assertThat(browsedTable.getStorageLocation()).isNull();
+    assertThat(browsedTable.getProperties()).isNull();
+
+    List<TableInfo> tablesWithBrowse =
+        regular1TablesApi.listTables("cat_pr1", "sch_pr1", 100, null, true).getTables();
+    TableInfo browsedTableFromList =
+        tablesWithBrowse.stream()
+            .filter(table -> table.getName().equals("tbl_pr1"))
+            .findFirst()
+            .orElseThrow();
+    assertThat(browsedTableFromList.getBrowseOnly()).isTrue();
+    assertThat(browsedTableFromList.getStorageLocation()).isNull();
 
     // get, table (admin) -> metastore admin -> allowed
     TableInfo tableInfoAdmin = getTable(adminTablesApi, "cat_pr1.sch_pr1.tbl_pr1");
@@ -192,14 +242,24 @@ public class SdkTableAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest 
                 .getStatusCode())
         .isEqualTo(204);
 
-    // Delta getTableCredentials authz: READ requires SELECT, READ_WRITE requires MODIFY
-    // getTableCredentials READ (regular-1) -> use catalog, use schema, but no SELECT -> denied
+    // MANAGE allows metadata administration, but it must never turn into table-data access.
+    grantPermissions(REGULAR_1, SecurableType.TABLE, "cat_pr1.sch_pr1.tbl_pr1", Privileges.MANAGE);
     assertPermissionDenied(
         () ->
             regular1DeltaCredsApi.getTableCredentials(
                 DeltaCredentialOperation.READ, "cat_pr1", "sch_pr1", "tbl_pr1"));
 
-    // getTableCredentials READ_WRITE (regular-2) -> has SELECT but not MODIFY -> denied
+    // SELECT and container USE privileges are still insufficient for an external client until the
+    // explicit schema external-use privilege is present.
+    assertPermissionDenied(
+        () ->
+            regular2DeltaCredsApi.getTableCredentials(
+                DeltaCredentialOperation.READ, "cat_pr1", "sch_pr1", "tbl_pr1"));
+    grantPermissions(
+        REGULAR_2, SecurableType.SCHEMA, "cat_pr1.sch_pr1", Privileges.EXTERNAL_USE_SCHEMA);
+
+    // getTableCredentials READ_WRITE (regular-2) -> has SELECT and external use, but not MODIFY ->
+    // denied.
     assertPermissionDenied(
         () ->
             regular2DeltaCredsApi.getTableCredentials(
@@ -230,7 +290,17 @@ public class SdkTableAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest 
 
     // grant USE SCHEMA to regular-2
     grantPermissions(
-        "regular-2@localhost", SecurableType.SCHEMA, "cat_pr1.sch_rg2", Privileges.USE_SCHEMA);
+        "regular-2@localhost",
+        SecurableType.SCHEMA,
+        "cat_pr1.sch_rg2",
+        Privileges.USE_SCHEMA,
+        Privileges.EXTERNAL_USE_SCHEMA);
+    grantPermissions(
+        REGULAR_2,
+        SecurableType.EXTERNAL_LOCATION,
+        externalLocationName,
+        Privileges.CREATE_EXTERNAL_TABLE,
+        Privileges.EXTERNAL_USE_LOCATION);
 
     // create, table (regular-2) -> owner [schema], USE CATALOG -> allowed
     CreateTable createTableRg2 =
@@ -239,7 +309,7 @@ public class SdkTableAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest 
             .catalogName("cat_pr1")
             .schemaName("sch_rg2")
             .columns(TEST_COLUMNS)
-            .storageLocation("/tmp/tab_rg2")
+            .storageLocation(testDirectoryRoot.resolve("tab_rg2").toString())
             .tableType(TableType.EXTERNAL)
             .dataSourceFormat(DataSourceFormat.DELTA);
     TableInfo tableRg2Info = regular2TablesApi.createTable(createTableRg2);
@@ -252,7 +322,8 @@ public class SdkTableAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest 
     // subsequent loadTable proves the wiring. (MANAGED skips re-init: its UUID was already
     // wired at createStagingTable time.)
     String deltaExternalName = "tbl_delta_authz";
-    String deltaExternalLocation = "/tmp/" + deltaExternalName + "_" + UUID.randomUUID();
+    String deltaExternalLocation =
+        testDirectoryRoot.resolve(deltaExternalName + "_" + UUID.randomUUID()).toString();
     DeltaLoadTableResponse deltaCreated =
         regular1DeltaApi.createTable(
             "cat_pr1",
@@ -300,7 +371,7 @@ public class SdkTableAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest 
             .catalogName("cat_pr1")
             .schemaName("sch_rg2")
             .columns(TEST_COLUMNS)
-            .storageLocation("/tmp/tab_rg2_delta")
+            .storageLocation(testDirectoryRoot.resolve("tab_rg2_delta").toString())
             .tableType(TableType.EXTERNAL)
             .dataSourceFormat(DataSourceFormat.DELTA);
     regular2TablesApi.createTable(createTableRg2Delta);
@@ -323,7 +394,7 @@ public class SdkTableAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest 
             .catalogName("cat_pr1")
             .schemaName("sch_rg2")
             .columns(TEST_COLUMNS)
-            .storageLocation("/tmp/tab_rg2_rename")
+            .storageLocation(testDirectoryRoot.resolve("tab_rg2_rename").toString())
             .tableType(TableType.EXTERNAL)
             .dataSourceFormat(DataSourceFormat.DELTA);
     regular2TablesApi.createTable(createTableRg2Rename);
@@ -364,6 +435,39 @@ public class SdkTableAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest 
                     new DeltaRenameTableRequest().newName("tab_rg2_renamed"))
                 .getStatusCode())
         .isEqualTo(204);
+  }
+
+  @Test
+  @SneakyThrows
+  public void materializedViewCreationUsesItsDedicatedPrivilege() {
+    createCommonTestUsers();
+    setupCommonCatalogAndSchema();
+    grantPermissions(REGULAR_1, SecurableType.CATALOG, "cat_pr1", Privileges.USE_CATALOG);
+    grantPermissions(
+        REGULAR_1,
+        SecurableType.SCHEMA,
+        "cat_pr1.sch_pr1",
+        Privileges.USE_SCHEMA,
+        Privileges.CREATE_TABLE);
+
+    TablesApi tablesApi =
+        new TablesApi(TestUtils.createApiClient(createTestUserServerConfig(REGULAR_1)));
+    CreateTable materializedView =
+        new CreateTable()
+            .name("materialized_view_auth")
+            .catalogName("cat_pr1")
+            .schemaName("sch_pr1")
+            .columns(TEST_COLUMNS)
+            .tableType(TableType.MATERIALIZED_VIEW)
+            .dataSourceFormat(DataSourceFormat.DELTA);
+
+    assertPermissionDenied(() -> tablesApi.createTable(materializedView));
+    grantPermissions(
+        REGULAR_1, SecurableType.SCHEMA, "cat_pr1.sch_pr1", Privileges.CREATE_MATERIALIZED_VIEW);
+    assertApiException(
+        () -> tablesApi.createTable(materializedView),
+        ErrorCode.INVALID_ARGUMENT,
+        "MATERIALIZED VIEW creation is not supported yet");
   }
 
   /**

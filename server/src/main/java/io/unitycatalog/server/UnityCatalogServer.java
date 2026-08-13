@@ -150,7 +150,11 @@ public class UnityCatalogServer implements AutoCloseable {
     if (serverProperties.isAuthorizationEnabled()) {
       try {
         LOGGER.info("Initializing JCasbinAuthorizer...");
-        UnityCatalogAuthorizer authorizer = new JCasbinAuthorizer(hibernateConfigurator);
+        UnityCatalogAuthorizer authorizer =
+            new JCasbinAuthorizer(
+                hibernateConfigurator,
+                repositories.getMetastoreRepository().getMetastoreId(),
+                repositories);
         new UnityAccessUtil(repositories).initializeAdmin(authorizer);
         return authorizer;
       } catch (Exception e) {
@@ -217,15 +221,23 @@ public class UnityCatalogServer implements AutoCloseable {
         .annotateUc(
             "external-locations",
             new ExternalLocationService(authorizer, repositories, serverProperties));
-    addIcebergApiServices(armeriaServerBuilder, schemaService, repositories, fileOperations);
+    addIcebergApiServices(
+        armeriaServerBuilder,
+        authorizer,
+        schemaService,
+        repositories,
+        serverProperties,
+        fileOperations);
     addDeltaApiServices(
         armeriaServerBuilder, authorizer, repositories, serverProperties, storageCredentialVendor);
   }
 
   private void addIcebergApiServices(
       ArmeriaServerBuilder armeriaServerBuilder,
+      UnityCatalogAuthorizer authorizer,
       SchemaService schemaService,
       Repositories repositories,
+      ServerProperties serverProperties,
       FileOperations fileOperations) {
     LOGGER.info("Adding Iceberg services...");
 
@@ -236,7 +248,12 @@ public class UnityCatalogServer implements AutoCloseable {
     armeriaServerBuilder.annotateIceberg(
         "iceberg",
         new IcebergRestCatalogService(
-            schemaService, tableConfigService, metadataService, repositories));
+            authorizer,
+            schemaService,
+            tableConfigService,
+            metadataService,
+            repositories,
+            serverProperties));
   }
 
   private void addDeltaApiServices(

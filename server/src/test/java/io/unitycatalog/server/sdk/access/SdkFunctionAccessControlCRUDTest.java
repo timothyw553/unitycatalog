@@ -119,10 +119,11 @@ public class SdkFunctionAccessControlCRUDTest extends SdkAccessControlBaseCRUDTe
     assertThat(principal1Functions.get(0).getName()).isEqualTo("fun_pr1");
 
     // get function -> no privileges -> denied
-    assertPermissionDenied(() -> principal2FunctionsApi.getFunction("cat_pr1.sch_pr1.fun_pr1"));
+    assertPermissionDenied(
+        () -> principal2FunctionsApi.getFunction("cat_pr1.sch_pr1.fun_pr1", null));
 
     // get function -> owner -> allow
-    FunctionInfo functionInfo = principal1FunctionsApi.getFunction("cat_pr1.sch_pr1.fun_pr1");
+    FunctionInfo functionInfo = principal1FunctionsApi.getFunction("cat_pr1.sch_pr1.fun_pr1", null);
     assertThat(functionInfo).isNotNull();
     assertThat(functionInfo.getName()).isEqualTo("fun_pr1");
 
@@ -135,5 +136,40 @@ public class SdkFunctionAccessControlCRUDTest extends SdkAccessControlBaseCRUDTe
     List<FunctionInfo> functionsAfterDelete =
         listAllFunctions(principal1FunctionsApi, "cat_pr1", "sch_pr1");
     assertThat(functionsAfterDelete).isEmpty();
+  }
+
+  @Test
+  @SneakyThrows
+  public void nonOwnerNeedsCreateFunction() {
+    createCommonTestUsers();
+    setupCommonCatalogAndSchema();
+    grantPermissions(REGULAR_1, SecurableType.CATALOG, "cat_pr1", Privileges.USE_CATALOG);
+    grantPermissions(REGULAR_1, SecurableType.SCHEMA, "cat_pr1.sch_pr1", Privileges.USE_SCHEMA);
+
+    FunctionsApi functionsApi =
+        new FunctionsApi(TestUtils.createApiClient(createTestUserServerConfig(REGULAR_1)));
+    CreateFunctionRequest request =
+        new CreateFunctionRequest()
+            .functionInfo(
+                new CreateFunction()
+                    .name("create_privilege_function")
+                    .catalogName("cat_pr1")
+                    .schemaName("sch_pr1")
+                    .parameterStyle(CreateFunction.ParameterStyleEnum.S)
+                    .isDeterministic(true)
+                    .isNullCall(false)
+                    .securityType(CreateFunction.SecurityTypeEnum.DEFINER)
+                    .specificName("create_privilege_function")
+                    .dataType(ColumnTypeName.INT)
+                    .fullDataType("INT")
+                    .inputParams(TEST_PARAMS)
+                    .externalLanguage("python")
+                    .routineBody(CreateFunction.RoutineBodyEnum.EXTERNAL)
+                    .routineDefinition("return x"));
+
+    assertPermissionDenied(() -> functionsApi.createFunction(request));
+    grantPermissions(
+        REGULAR_1, SecurableType.SCHEMA, "cat_pr1.sch_pr1", Privileges.CREATE_FUNCTION);
+    assertThat(functionsApi.createFunction(request)).isNotNull();
   }
 }

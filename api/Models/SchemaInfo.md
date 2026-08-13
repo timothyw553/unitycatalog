@@ -16,6 +16,7 @@
 | **schema\_id** | **String** | Unique identifier for the schema. | [optional] [default to null] |
 | **storage\_root** | **String** | Storage root URL for managed storage location of schema. This can be set when creating a schema. Example: s3://bucket/ucroot  | [optional] [default to null] |
 | **storage\_location** | **String** | Storage Location URL (full path) for managed storage location of schema. This is an automatically generated unique path under storage_root. If it is absent, managed securables under this schema will try to use storage_location of the parent catalog instead. Example: s3://bucket/ucroot/__unitystorage/schemas/{schema_id}  | [optional] [default to null] |
+| **browse\_only** | **Boolean** | Indicates whether the principal is limited to retrieving metadata for the associated object through the BROWSE privilege when include_browse is enabled in the request. | [optional] [default to null] |
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

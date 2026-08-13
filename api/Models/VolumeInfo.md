@@ -16,6 +16,7 @@
 | **volume\_type** | [**VolumeType**](VolumeType.md) |  | [optional] [default to null] |
 | **storage\_location** | **String** | The storage location of the volume | [optional] [default to null] |
 | **full\_name** | **String** | Full name of volume, in form of __catalog_name__.__schema_name__.__volume_name__. | [optional] [default to null] |
+| **browse\_only** | **Boolean** | Indicates whether the principal is limited to retrieving metadata for the associated object through the BROWSE privilege when include_browse is enabled in the request. | [optional] [default to null] |
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

@@ -6,6 +6,7 @@ import io.unitycatalog.server.persist.model.Privileges;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -35,6 +36,7 @@ public class UnityAccessEvaluator {
   private final MethodHandle authorizeHandle;
   private final MethodHandle authorizeAnyHandle;
   private final MethodHandle authorizeAllHandle;
+  private final MethodHandle authorizeDirectAnyHandle;
 
   public UnityAccessEvaluator(UnityCatalogAuthorizer authorizer)
       throws NoSuchMethodException, IllegalAccessException {
@@ -53,6 +55,10 @@ public class UnityAccessEvaluator {
     mt = MethodType.methodType(boolean.class, Object[].class);
     mh = lookup.findVirtual(this.getClass(), "authorizeAll", mt);
     authorizeAllHandle = mh.bindTo(this);
+
+    mt = MethodType.methodType(boolean.class, Object[].class);
+    mh = lookup.findVirtual(this.getClass(), "authorizeDirectAny", mt);
+    authorizeDirectAnyHandle = mh.bindTo(this);
   }
 
   protected boolean authorizeAny(Object... parameters) {
@@ -71,6 +77,23 @@ public class UnityAccessEvaluator {
     Privileges[] privileges = new Privileges[parameters.length - 2];
     System.arraycopy(parameters, 2, privileges, 0, privileges.length);
     return authorizer.authorizeAll(principalId, resource, privileges);
+  }
+
+  /** Returns whether any requested privilege is granted directly on the resource. */
+  protected boolean authorizeDirectAny(Object... parameters) {
+    UUID principalId = (UUID) parameters[0];
+    UUID resource = (UUID) parameters[1];
+    List<Privileges> directPrivileges = authorizer.listAuthorizations(principalId, resource);
+    for (int index = 2; index < parameters.length; index++) {
+      if (directPrivileges.contains((Privileges) parameters[index])) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  boolean authorize(UUID principal, UUID resource, Privileges privilege) {
+    return authorizer.authorize(principal, resource, privilege);
   }
 
   /**
@@ -92,6 +115,7 @@ public class UnityAccessEvaluator {
     context.registerFunction("authorize", authorizeHandle);
     context.registerFunction("authorizeAny", authorizeAnyHandle);
     context.registerFunction("authorizeAll", authorizeAllHandle);
+    context.registerFunction("authorizeDirectAny", authorizeDirectAnyHandle);
 
     context.setVariable("deny", Boolean.FALSE);
     context.setVariable("permit", Boolean.TRUE);

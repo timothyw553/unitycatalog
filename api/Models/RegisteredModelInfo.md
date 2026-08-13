@@ -15,6 +15,7 @@
 | **updated\_at** | **Long** | Last-update timestamp of the registered model in milliseconds since the Unix epoch | [optional] [default to null] |
 | **updated\_by** | **String** | The identifier of the user who updated the registered model last time | [optional] [default to null] |
 | **id** | **String** | Unique identifier for the registered model. | [optional] [default to null] |
+| **browse\_only** | **Boolean** | Indicates whether the principal is limited to retrieving metadata for the associated object through the BROWSE privilege when include_browse is enabled in the request. | [optional] [default to null] |
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

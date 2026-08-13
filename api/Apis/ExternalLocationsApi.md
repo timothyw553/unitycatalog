@@ -68,7 +68,7 @@ No authorization required
 
 <a name="getExternalLocation"></a>
 # **getExternalLocation**
-> ExternalLocationInfo getExternalLocation(name)
+> ExternalLocationInfo getExternalLocation(name, include\_browse)
 
 Get an external location
 
@@ -79,6 +79,7 @@ Get an external location
 |Name | Type | Description  | Notes |
 |------------- | ------------- | ------------- | -------------|
 | **name** | **String**| Name of the external location. | [default to null] |
+| **include\_browse** | **Boolean**| Whether to include external locations in the response for which the principal can only access selective metadata. | [optional] [default to null] |
 
 ### Return type
 
@@ -95,7 +96,7 @@ No authorization required
 
 <a name="listExternalLocations"></a>
 # **listExternalLocations**
-> ListExternalLocationsResponse listExternalLocations(max\_results, page\_token)
+> ListExternalLocationsResponse listExternalLocations(max\_results, page\_token, include\_browse)
 
 List external locations
 
@@ -107,6 +108,7 @@ List external locations
 |------------- | ------------- | ------------- | -------------|
 | **max\_results** | **Integer**| Maximum number of external locations to return. If not set, all external locations are returned.  | [optional] [default to null] |
 | **page\_token** | **String**| Opaque pagination token to go to the next page. | [optional] [default to null] |
+| **include\_browse** | **Boolean**| Whether to include external locations in the response for which the principal can only access selective metadata. | [optional] [default to null] |
 
 ### Return type
 

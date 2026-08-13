@@ -187,6 +187,42 @@ public class SdkCredentialAccessControlTest extends SdkAccessControlBaseCRUDTest
     assertDeleteSuccess(adminApi, adminCredential);
   }
 
+  @Test
+  public void testAnyDirectCredentialPrivilegeAllowsMetadataAccess() throws Exception {
+    String credentialName = "direct_privilege_credential";
+    assertCreateSuccess(adminApi, credentialName);
+
+    // A privilege on the metastore must not count as a privilege on every credential.
+    grantPermissions(
+        USER_C_EMAIL, SecurableType.METASTORE, METASTORE_NAME, Privileges.CREATE_EXTERNAL_LOCATION);
+    assertGetAndListPermissions(userCApi, List.of(), List.of(credentialName));
+    revokePermissions(
+        USER_C_EMAIL, SecurableType.METASTORE, METASTORE_NAME, Privileges.CREATE_EXTERNAL_LOCATION);
+
+    // READ METADATA on the metastore intentionally reveals every credential.
+    grantPermissions(
+        USER_C_EMAIL, SecurableType.METASTORE, METASTORE_NAME, Privileges.READ_METADATA);
+    assertGetAndListPermissions(userCApi, List.of(credentialName), List.of());
+    revokePermissions(
+        USER_C_EMAIL, SecurableType.METASTORE, METASTORE_NAME, Privileges.READ_METADATA);
+
+    // Every privilege that can be assigned directly to a credential reveals its metadata.
+    for (Privileges privilege :
+        List.of(
+            Privileges.ALL_PRIVILEGES,
+            Privileges.APPLY_TAG,
+            Privileges.CREATE_EXTERNAL_LOCATION,
+            Privileges.CREATE_EXTERNAL_TABLE,
+            Privileges.MANAGE,
+            Privileges.READ_FILES,
+            Privileges.READ_METADATA,
+            Privileges.WRITE_FILES)) {
+      grantPermissions(USER_C_EMAIL, SecurableType.CREDENTIAL, credentialName, privilege);
+      assertGetAndListPermissions(userCApi, List.of(credentialName), List.of());
+      revokePermissions(USER_C_EMAIL, SecurableType.CREDENTIAL, credentialName, privilege);
+    }
+  }
+
   private void assertCreateSuccess(CredentialsApi api, String name) throws ApiException {
     CredentialInfo created =
         api.createCredential(

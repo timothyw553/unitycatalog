@@ -48,53 +48,81 @@ public class TemporaryPathCredentialsService {
   //   4b. ditto for volume and registered_model
   // 5. Otherwise, the path must belong to one external location and user must have access to
   //  it.
-  // This function will only set resource key for ONE of the table, volume, model, or external
-  // location.
+  // This function will set the most specific table, volume, or model resource when one owns the
+  // path. It also keeps the covering external location so the explicit external-use permission can
+  // be checked independently.
 
   // Once it decided which securable to authorize against:
-  // a. For external location, it requires READ_FILES for reads, and +WRITE_FILES for writes
-  //  and reads.
-  // b. For table, it requires SELECT for reads, and +MODIFY for writes and reads.
-  // c. For volume, it requires READ_VOLUME for reads, and OWNER for writes and reads.
-  //  (WRITE_VOLUME is not implemented yet)
-  // d. For model,  it requires EXECUTE for reads, and OWNER for writes and reads.
-  // e. Additionally for all data securables, it requires USE_CATALOG and USE_SCHEMA (or OWNER)
+  // a. Every non-admin path request requires EXTERNAL_USE_LOCATION on the covering location.
+  // b. For external location, it additionally requires READ_FILES for reads, and +WRITE_FILES for
+  //  writes and reads.
+  // c. For table, it requires SELECT for reads, and +MODIFY for writes and reads, plus
+  //  EXTERNAL_USE_SCHEMA.
+  // d. For volume, it requires READ_VOLUME for reads, and +WRITE_VOLUME for writes and reads, plus
+  //  EXTERNAL_USE_SCHEMA.
+  // e. For model, it requires EXECUTE for reads, and OWNER for writes and reads.
+  // f. Additionally for all data securables, it requires USE_CATALOG and USE_SCHEMA (or OWNER)
   //  of the parent catalog and schema.
   @Post("")
   @AuthorizeExpression("""
       #operation == 'PATH_READ' ? (
         #authorize(#principal, #metastore, OWNER) ||
         (#table != null &&
+         #external_location != null &&
+         #authorize(#principal, #external_location, EXTERNAL_USE_LOCATION) &&
          #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
+         #authorize(#principal, #schema, EXTERNAL_USE_SCHEMA) &&
          #authorizeAny(#principal, #table, OWNER, SELECT)) ||
         (#volume != null &&
+         #external_location != null &&
+         #authorize(#principal, #external_location, EXTERNAL_USE_LOCATION) &&
          #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
+         #authorize(#principal, #schema, EXTERNAL_USE_SCHEMA) &&
          #authorizeAny(#principal, #volume, OWNER, READ_VOLUME)) ||
         (#registered_model != null &&
+         #external_location != null &&
+         #authorize(#principal, #external_location, EXTERNAL_USE_LOCATION) &&
          #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
          #authorizeAny(#principal, #registered_model, OWNER, EXECUTE)) ||
-        (#external_location != null &&
+        (#table == null &&
+         #volume == null &&
+         #registered_model == null &&
+         #external_location != null &&
+         #authorize(#principal, #external_location, EXTERNAL_USE_LOCATION) &&
          #authorizeAny(#principal, #external_location, OWNER, READ_FILES))
       )
       : #operation == 'PATH_READ_WRITE' ? (
         #authorize(#principal, #metastore, OWNER) ||
         (#table != null &&
+         #external_location != null &&
+         #authorize(#principal, #external_location, EXTERNAL_USE_LOCATION) &&
          #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
+         #authorize(#principal, #schema, EXTERNAL_USE_SCHEMA) &&
          (#authorize(#principal, #table, OWNER) ||
           #authorizeAll(#principal, #table, SELECT, MODIFY))) ||
         (#volume != null &&
+         #external_location != null &&
+         #authorize(#principal, #external_location, EXTERNAL_USE_LOCATION) &&
          #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
-         #authorize(#principal, #volume, OWNER)) ||
+         #authorize(#principal, #schema, EXTERNAL_USE_SCHEMA) &&
+         (#authorize(#principal, #volume, OWNER) ||
+          #authorizeAll(#principal, #volume, READ_VOLUME, WRITE_VOLUME))) ||
         (#registered_model != null &&
+         #external_location != null &&
+         #authorize(#principal, #external_location, EXTERNAL_USE_LOCATION) &&
          #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
          #authorize(#principal, #registered_model, OWNER)) ||
-        (#external_location != null &&
+        (#table == null &&
+         #volume == null &&
+         #registered_model == null &&
+         #external_location != null &&
+         #authorize(#principal, #external_location, EXTERNAL_USE_LOCATION) &&
          (#authorize(#principal, #external_location, OWNER) ||
           #authorizeAll(#principal, #external_location, READ_FILES, WRITE_FILES)))
       )
@@ -102,6 +130,7 @@ public class TemporaryPathCredentialsService {
         #no_overlap_with_data_securable &&
         (#authorize(#principal, #metastore, OWNER) ||
          (#external_location != null &&
+          #authorize(#principal, #external_location, EXTERNAL_USE_LOCATION) &&
           #authorizeAny(#principal, #external_location, OWNER, CREATE_EXTERNAL_TABLE)))
       )
       : #deny

@@ -275,6 +275,27 @@ public abstract class SdkAccessControlBaseCRUDTest extends BaseAccessControlCRUD
     }
   }
 
+  /** Revokes permissions previously granted to a user on a resource. */
+  protected void revokePermissions(
+      String userEmail,
+      SecurableType resourceSecurableType,
+      String resourceFullName,
+      Privileges... privileges)
+      throws Exception {
+    List<Privilege> privilegeList =
+        Arrays.stream(privileges)
+            .map(p -> Privilege.fromValue(p.getValue()))
+            .collect(Collectors.toList());
+    if (!privilegeList.isEmpty()) {
+      PermissionsChange permissionsChange =
+          new PermissionsChange().principal(userEmail).add(List.of()).remove(privilegeList);
+      grantsApi.update(
+          resourceSecurableType,
+          resourceFullName,
+          new UpdatePermissions().changes(List.of(permissionsChange)));
+    }
+  }
+
   /**
    * Helper method to create a JWT token for testing purposes using the actual RSA keys from the
    * configuration.
@@ -329,7 +350,8 @@ public abstract class SdkAccessControlBaseCRUDTest extends BaseAccessControlCRUD
     List<TableInfo> allTables = new ArrayList<>();
     String pageToken = null;
     do {
-      ListTablesResponse response = tablesApi.listTables(catalogName, schemaName, 100, pageToken);
+      ListTablesResponse response =
+          tablesApi.listTables(catalogName, schemaName, 100, pageToken, null);
       allTables.addAll(response.getTables());
       pageToken = response.getNextPageToken();
     } while (pageToken != null);
@@ -351,7 +373,7 @@ public abstract class SdkAccessControlBaseCRUDTest extends BaseAccessControlCRUD
     String pageToken = null;
     do {
       ListVolumesResponseContent response =
-          volumesApi.listVolumes(catalogName, schemaName, 100, pageToken);
+          volumesApi.listVolumes(catalogName, schemaName, 100, pageToken, null);
       allVolumes.addAll(response.getVolumes());
       pageToken = response.getNextPageToken();
     } while (pageToken != null);
@@ -373,7 +395,7 @@ public abstract class SdkAccessControlBaseCRUDTest extends BaseAccessControlCRUD
     String pageToken = null;
     do {
       ListFunctionsResponse response =
-          functionsApi.listFunctions(catalogName, schemaName, 100, pageToken);
+          functionsApi.listFunctions(catalogName, schemaName, 100, pageToken, null);
       allFunctions.addAll(response.getFunctions());
       pageToken = response.getNextPageToken();
     } while (pageToken != null);
@@ -395,7 +417,7 @@ public abstract class SdkAccessControlBaseCRUDTest extends BaseAccessControlCRUD
     String pageToken = null;
     do {
       ListRegisteredModelsResponse response =
-          modelsApi.listRegisteredModels(catalogName, schemaName, 100, pageToken);
+          modelsApi.listRegisteredModels(catalogName, schemaName, 100, pageToken, null);
       allModels.addAll(response.getRegisteredModels());
       pageToken = response.getNextPageToken();
     } while (pageToken != null);
@@ -415,7 +437,8 @@ public abstract class SdkAccessControlBaseCRUDTest extends BaseAccessControlCRUD
     List<ModelVersionInfo> allVersions = new ArrayList<>();
     String pageToken = null;
     do {
-      ListModelVersionsResponse response = versionsApi.listModelVersions(fullName, 100, pageToken);
+      ListModelVersionsResponse response =
+          versionsApi.listModelVersions(fullName, 100, pageToken, null);
       allVersions.addAll(response.getModelVersions());
       pageToken = response.getNextPageToken();
     } while (pageToken != null);
@@ -431,7 +454,7 @@ public abstract class SdkAccessControlBaseCRUDTest extends BaseAccessControlCRUD
    */
   @SneakyThrows
   protected TableInfo getTable(TablesApi tablesApi, String tableFullName) {
-    return tablesApi.getTable(tableFullName, true, false);
+    return tablesApi.getTable(tableFullName, true, false, null);
   }
 
   /** Common setup: Create standard test users (principal-1, principal-2, regular-1, regular-2). */

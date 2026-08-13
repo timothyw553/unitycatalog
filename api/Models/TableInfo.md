@@ -20,6 +20,7 @@
 | **table\_id** | **String** | Unique identifier for the table. | [optional] [default to null] |
 | **view\_definition** | **String** | Definition text for view-like table types such as VIEW, MATERIALIZED_VIEW, STREAMING_TABLE, and METRIC_VIEW. The format depends on the table type (SQL for views, YAML for metric views). | [optional] [default to null] |
 | **view\_dependencies** | [**DependencyList**](DependencyList.md) |  | [optional] [default to null] |
+| **browse\_only** | **Boolean** | Indicates whether the principal is limited to retrieving metadata for the associated object through the BROWSE privilege when include_browse is enabled in the request. | [optional] [default to null] |
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

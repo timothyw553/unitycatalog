@@ -36,14 +36,14 @@ public class SdkModelOperations implements ModelOperations {
       throws ApiException {
     return registeredModelsApi
         .listRegisteredModels(
-            catalogName.orElse(null), schemaName.orElse(null), 100, pageToken.orElse(null))
+            catalogName.orElse(null), schemaName.orElse(null), 100, pageToken.orElse(null), null)
         .getRegisteredModels();
   }
 
   @Override
   public RegisteredModelInfo getRegisteredModel(String registeredModelFullName)
       throws ApiException {
-    return registeredModelsApi.getRegisteredModel(registeredModelFullName);
+    return registeredModelsApi.getRegisteredModel(registeredModelFullName, null);
   }
 
   @Override
@@ -68,14 +68,14 @@ public class SdkModelOperations implements ModelOperations {
   public List<ModelVersionInfo> listModelVersions(
       String registeredModelFullName, Optional<String> pageToken) throws ApiException {
     return modelVersionsApi
-        .listModelVersions(registeredModelFullName, 100, pageToken.orElse(null))
+        .listModelVersions(registeredModelFullName, 100, pageToken.orElse(null), null)
         .getModelVersions();
   }
 
   @Override
   public ModelVersionInfo getModelVersion(String registeredModelFullName, Long version)
       throws ApiException {
-    return modelVersionsApi.getModelVersion(registeredModelFullName, version);
+    return modelVersionsApi.getModelVersion(registeredModelFullName, version, null);
   }
 
   @Override
