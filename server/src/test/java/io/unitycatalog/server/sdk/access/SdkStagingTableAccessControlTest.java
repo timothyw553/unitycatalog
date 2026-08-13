@@ -67,14 +67,8 @@ public abstract class SdkStagingTableAccessControlTest extends SdkAccessControlB
     createTestUser(userAEmail, "User A");
     createTestUser(userBEmail, "User B");
 
-    // Grant permissions to both users on metastore, catalog, and schema
+    // Grant ordinary catalog and schema creation permissions to both users.
     for (String email : List.of(userAEmail, userBEmail)) {
-      grantPermissions(
-          email,
-          SecurableType.METASTORE,
-          METASTORE_NAME,
-          Privileges.USE_CATALOG,
-          Privileges.CREATE_CATALOG);
       grantPermissions(
           email, SecurableType.CATALOG, TestUtils.CATALOG_NAME, Privileges.USE_CATALOG);
       grantPermissions(
@@ -88,6 +82,29 @@ public abstract class SdkStagingTableAccessControlTest extends SdkAccessControlB
     ServerConfig userAConfig = createTestUserServerConfig(userAEmail);
     ServerConfig userBConfig = createTestUserServerConfig(userBEmail);
 
+    // Staging creation returns writable credentials. Ordinary creation privileges are therefore
+    // insufficient until the external-use privilege is granted explicitly.
+    TestUtils.assertPermissionDenied(
+        () ->
+            createStaging(
+                userAConfig,
+                TestUtils.CATALOG_NAME,
+                TestUtils.SCHEMA_NAME,
+                "staging_denied_without_external_use"));
+    grantPermissions(
+        userAEmail, SecurableType.SCHEMA, TestUtils.SCHEMA_FULL_NAME, Privileges.ALL_PRIVILEGES);
+    TestUtils.assertPermissionDenied(
+        () ->
+            createStaging(
+                userAConfig,
+                TestUtils.CATALOG_NAME,
+                TestUtils.SCHEMA_NAME,
+                "staging_denied_with_all_privileges"));
+    for (String email : List.of(userAEmail, userBEmail)) {
+      grantPermissions(
+          email, SecurableType.SCHEMA, TestUtils.SCHEMA_FULL_NAME, Privileges.EXTERNAL_USE_SCHEMA);
+    }
+
     // Step 1: User A creates a staging table (surface-specific).
     StagingHandle staging =
         createStaging(
@@ -97,7 +114,18 @@ public abstract class SdkStagingTableAccessControlTest extends SdkAccessControlB
     // Step 2: temp-creds access control on the staging table -- exercised against the subclass's
     // own surface (UC REST generateTemporaryTableCredentials / Delta REST
     // getStagingTableCredentials).
-    // Owner allowed; non-owner denied.
+    // Ownership still does not replace EXTERNAL_USE_SCHEMA when credentials are fetched later.
+    revokePermissions(
+        userAEmail,
+        SecurableType.SCHEMA,
+        TestUtils.SCHEMA_FULL_NAME,
+        Privileges.EXTERNAL_USE_SCHEMA);
+    TestUtils.assertPermissionDenied(() -> fetchTempCreds(userAConfig, staging.id()));
+    grantPermissions(
+        userAEmail,
+        SecurableType.SCHEMA,
+        TestUtils.SCHEMA_FULL_NAME,
+        Privileges.EXTERNAL_USE_SCHEMA);
     fetchTempCreds(userAConfig, staging.id());
     TestUtils.assertPermissionDenied(() -> fetchTempCreds(userBConfig, staging.id()));
 
@@ -118,7 +146,8 @@ public abstract class SdkStagingTableAccessControlTest extends SdkAccessControlB
 
     // User D covers the `schema OWNER` arm. OWNER is not grantable via the API (it's implicit from
     // creating a resource), so User D creates their own schema and then creates a staging table in
-    // it -- with no explicit CREATE_TABLE grant, only the schema OWNER path can admit this call.
+    // it -- with no explicit CREATE_TABLE grant. Schema OWNER satisfies the creation half, but
+    // does not imply EXTERNAL_USE_SCHEMA.
     String userDEmail = "user_d@example.com";
     String userDSchema = "user_d_schema";
     createTestUser(userDEmail, "User D");
@@ -131,6 +160,18 @@ public abstract class SdkStagingTableAccessControlTest extends SdkAccessControlB
     ServerConfig userDConfig = createTestUserServerConfig(userDEmail);
     new SchemasApi(TestUtils.createApiClient(userDConfig))
         .createSchema(new CreateSchema().name(userDSchema).catalogName(TestUtils.CATALOG_NAME));
+    TestUtils.assertPermissionDenied(
+        () ->
+            createStaging(
+                userDConfig,
+                TestUtils.CATALOG_NAME,
+                userDSchema,
+                "staging_denied_via_schema_owner"));
+    grantPermissions(
+        userDEmail,
+        SecurableType.SCHEMA,
+        TestUtils.CATALOG_NAME + "." + userDSchema,
+        Privileges.EXTERNAL_USE_SCHEMA);
     assertThat(
             createStaging(
                 userDConfig,

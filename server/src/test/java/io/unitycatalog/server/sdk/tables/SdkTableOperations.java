@@ -53,7 +53,9 @@ public class SdkTableOperations implements TableOperations {
   public List<TableInfo> listTables(
       String catalogName, String schemaName, Optional<String> pageToken) throws ApiException {
     return Objects.requireNonNull(
-        tablesApi.listTables(catalogName, schemaName, 100, pageToken.orElse(null)).getTables());
+        tablesApi
+            .listTables(catalogName, schemaName, 100, pageToken.orElse(null), null)
+            .getTables());
   }
 
   @Override
@@ -61,7 +63,8 @@ public class SdkTableOperations implements TableOperations {
     return tablesApi.getTable(
         tableFullName,
         /* readStreamingTableAsManaged = */ true,
-        /* readMaterializedViewAsManaged = */ true);
+        /* readMaterializedViewAsManaged = */ true,
+        /* includeBrowse = */ null);
   }
 
   @Override

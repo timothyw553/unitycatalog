@@ -12,6 +12,7 @@ import static io.unitycatalog.server.model.SecurableType.VOLUME;
 
 import io.unitycatalog.control.model.User;
 import io.unitycatalog.server.auth.AuthorizeExpressions;
+import io.unitycatalog.server.auth.PrivilegePolicy;
 import io.unitycatalog.server.auth.UnityCatalogAuthorizer;
 import io.unitycatalog.server.auth.annotation.AuthorizeExpression;
 import io.unitycatalog.server.auth.annotation.AuthorizeResourceKey;
@@ -40,7 +41,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -145,28 +145,11 @@ public class PermissionService {
 
   private HttpResponse getAuthorization(
       SecurableType securableType, String name) {
-
-    // Only show permissions for the authenticated identity unless they are the owner
-    // or if the authenticated identity is the owner of the parent resource(s)
-    // of the resource or the metastore itself.
-
     UUID resourceId = getResourceId(securableType, name);
     UUID principalId = userRepository.findPrincipalId();
 
-    // TODO: could be more explicit about the hierarchy here.
-    // For now this is sufficient in that it covers owner on resources parentage.
-    UUID parentId = authorizer.getHierarchyParent(resourceId);
-    UUID grandparentId = (parentId != null) ? authorizer.getHierarchyParent(parentId) : null;
-
-    boolean isOwner =
-        authorizer.authorize(principalId, metastoreRepository.getMetastoreId(), Privileges.OWNER)
-            || authorizer.authorize(principalId, resourceId, Privileges.OWNER)
-            || (parentId != null && authorizer.authorize(principalId, parentId, Privileges.OWNER))
-            || (grandparentId != null
-                && authorizer.authorize(principalId, grandparentId, Privileges.OWNER));
-
     Map<UUID, List<Privileges>> authorizations =
-        isOwner
+        canReadAllPermissions(securableType, principalId, resourceId)
             ? authorizer.listAuthorizations(resourceId)
             : Map.of(principalId, authorizer.listAuthorizations(principalId, resourceId));
 
@@ -174,13 +157,7 @@ public class PermissionService {
         authorizations.entrySet().stream()
             .map(
                 entry -> {
-                  List<Privilege> privileges =
-                      entry.getValue().stream()
-                          .<Privilege>map(Privileges::toPrivilege)
-                          // mapping to Privilege may result in nulls since Privilege is a subset of
-                          // Privileges, so filter them out.
-                          .filter(Objects::nonNull)
-                          .toList();
+                  List<Privilege> privileges = toApiPrivileges(entry.getValue());
                   return new PrivilegeAssignment()
                       .principal(userRepository.getUser(entry.getKey().toString()).getEmail())
                       .privileges(privileges);
@@ -189,6 +166,57 @@ public class PermissionService {
             .collect(Collectors.toList());
 
     return HttpResponse.ofJson(new PermissionsList().privilegeAssignments(privilegeAssignments));
+  }
+
+  /**
+   * Returns whether a principal may inspect every grant on a resource.
+   *
+   * <p>The authorizer deliberately supports inherited privileges, but permission reads also need to
+   * know which ancestor supplied an administrative privilege. A catalog-level administrative
+   * grant needs no {@code USE} privilege. A schema-level grant needs {@code USE_CATALOG}, and a
+   * leaf-level grant needs both {@code USE_CATALOG} and {@code USE_SCHEMA}.
+   */
+  private boolean canReadAllPermissions(
+      SecurableType securableType, UUID principalId, UUID resourceId) {
+    UUID metastoreId = metastoreRepository.getMetastoreId();
+    if (hasDirectReadAdministrativePrivilege(principalId, metastoreId)) {
+      return true;
+    }
+
+    return switch (securableType) {
+      case METASTORE -> false;
+      case CATALOG, EXTERNAL_LOCATION, CREDENTIAL ->
+          hasDirectReadAdministrativePrivilege(principalId, resourceId);
+      case SCHEMA -> {
+        UUID catalogId = authorizer.getHierarchyParent(resourceId);
+        yield catalogId != null
+            && (hasDirectReadAdministrativePrivilege(principalId, catalogId)
+                || (authorizer.authorize(
+                        principalId, catalogId, Privileges.USE_CATALOG)
+                    && hasDirectReadAdministrativePrivilege(principalId, resourceId)));
+      }
+      case TABLE, FUNCTION, VOLUME, REGISTERED_MODEL -> {
+        UUID schemaId = authorizer.getHierarchyParent(resourceId);
+        UUID catalogId = schemaId == null ? null : authorizer.getHierarchyParent(schemaId);
+        yield catalogId != null
+            && (hasDirectReadAdministrativePrivilege(principalId, catalogId)
+                || (authorizer.authorize(
+                        principalId, catalogId, Privileges.USE_CATALOG)
+                    && (hasDirectReadAdministrativePrivilege(principalId, schemaId)
+                        || (authorizer.authorize(
+                                principalId, schemaId, Privileges.USE_SCHEMA)
+                            && hasDirectReadAdministrativePrivilege(
+                                principalId, resourceId)))));
+      }
+      default -> false;
+    };
+  }
+
+  private boolean hasDirectReadAdministrativePrivilege(UUID principalId, UUID resourceId) {
+    List<Privileges> privileges = authorizer.listAuthorizations(principalId, resourceId);
+    return privileges.contains(Privileges.OWNER)
+        || privileges.contains(Privileges.MANAGE)
+        || privileges.contains(Privileges.READ_METADATA);
   }
 
   // TODO: Refactor these endpoints to use a common method with dynamic resource id lookup
@@ -201,8 +229,10 @@ public class PermissionService {
   }
 
   @Patch("/catalog/{name}")
-  @AuthorizeExpression(
-      "#authorize(#principal, #metastore, OWNER) || #authorize(#principal, #catalog, OWNER)")
+  @AuthorizeExpression("""
+      #authorize(#principal, #metastore, OWNER) ||
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE)
+      """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateCatalogAuthorization(
       @Param("name") @AuthorizeResourceKey(CATALOG) String name, UpdatePermissions request) {
@@ -212,8 +242,9 @@ public class PermissionService {
   @Patch("/schema/{name}")
   @AuthorizeExpression("""
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #schema, OWNER) && #authorize(#principal, #catalog, USE_CATALOG))
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorizeAny(#principal, #schema, OWNER, MANAGE) &&
+          #authorize(#principal, #catalog, USE_CATALOG))
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateSchemaAuthorization(
@@ -224,11 +255,12 @@ public class PermissionService {
   @Patch("/table/{name}")
   @AuthorizeExpression("""
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #catalog, USE_CATALOG) && #authorize(#principal, #schema, OWNER)) ||
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE)) ||
       (#authorize(#principal, #catalog, USE_CATALOG) &&
           #authorize(#principal, #schema, USE_SCHEMA) &&
-          #authorize(#principal, #table, OWNER))
+          #authorizeAny(#principal, #table, OWNER, MANAGE))
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateTableAuthorization(
@@ -239,11 +271,12 @@ public class PermissionService {
   @Patch("/function/{name}")
   @AuthorizeExpression("""
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #catalog, USE_CATALOG) && #authorize(#principal, #schema, OWNER)) ||
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE)) ||
       (#authorize(#principal, #catalog, USE_CATALOG) &&
           #authorize(#principal, #schema, USE_SCHEMA) &&
-          #authorize(#principal, #function, OWNER))
+          #authorizeAny(#principal, #function, OWNER, MANAGE))
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateFunctionAuthorization(
@@ -254,11 +287,12 @@ public class PermissionService {
   @Patch("/volume/{name}")
   @AuthorizeExpression("""
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #catalog, USE_CATALOG) && #authorize(#principal, #schema, OWNER)) ||
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE)) ||
       (#authorize(#principal, #catalog, USE_CATALOG) &&
           #authorize(#principal, #schema, USE_SCHEMA) &&
-          #authorize(#principal, #volume, OWNER))
+          #authorizeAny(#principal, #volume, OWNER, MANAGE))
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateVolumeAuthorization(
@@ -267,8 +301,15 @@ public class PermissionService {
   }
 
   @Patch("/registered_model/{name}")
-  @AuthorizeExpression(
-      "#authorize(#principal, #metastore, OWNER) || #authorize(#principal, #registered_model, OWNER)")
+  @AuthorizeExpression("""
+      #authorize(#principal, #metastore, OWNER) ||
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE)) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorize(#principal, #schema, USE_SCHEMA) &&
+          #authorizeAny(#principal, #registered_model, OWNER, MANAGE))
+      """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateRegisteredModelAuthorization(
       @Param("name") @AuthorizeResourceKey(REGISTERED_MODEL) String name,
@@ -277,8 +318,10 @@ public class PermissionService {
   }
 
   @Patch("/external_location/{name}")
-  @AuthorizeExpression(
-      "#authorize(#principal, #metastore, OWNER) || #authorize(#principal, #external_location, OWNER)")
+  @AuthorizeExpression("""
+      #authorize(#principal, #metastore, OWNER) ||
+      #authorizeAny(#principal, #external_location, OWNER, MANAGE)
+      """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateExternalLocationAuthorization(
       @Param("name") @AuthorizeResourceKey(EXTERNAL_LOCATION) String name,
@@ -287,8 +330,10 @@ public class PermissionService {
   }
 
   @Patch("/credential/{name}")
-  @AuthorizeExpression(
-      "#authorize(#principal, #metastore, OWNER) || #authorize(#principal, #credential, OWNER)")
+  @AuthorizeExpression("""
+      #authorize(#principal, #metastore, OWNER) ||
+      #authorizeAny(#principal, #credential, OWNER, MANAGE)
+      """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateCredentialAuthorization(
       @Param("name") @AuthorizeResourceKey(CREDENTIAL) String name, UpdatePermissions request) {
@@ -299,29 +344,39 @@ public class PermissionService {
       SecurableType securableType, String name, UpdatePermissions request) {
     UUID resourceId = getResourceId(securableType, name);
     List<PermissionsChange> changes = request.getChanges();
-    Set<UUID> principalIds = new HashSet<>();
-    changes.forEach(
-        change -> {
-          String principal = change.getPrincipal();
-          User user = userRepository.getUserByEmail(principal);
-          UUID principalId = UUID.fromString(Objects.requireNonNull(user.getId()));
-          principalIds.add(principalId);
-          change
-              .getAdd()
-              .forEach(
-                  privilege ->
-                      //  Privileges should always be a superset of Privilege so this _should_
-                      // always be non-null but let's be safe anyway.
-                      Optional.ofNullable(Privileges.fromPrivilege(privilege))
-                          .map(p -> authorizer.grantAuthorization(principalId, resourceId, p)));
-          change
-              .getRemove()
-              .forEach(
-                  privilege ->
-                      //  Privileges should always be a superset of Privilege so this _should_
-                      // always be non-null but let's be safe anyway.
-                      Optional.ofNullable(Privileges.fromPrivilege(privilege))
-                          .map(p -> authorizer.revokeAuthorization(principalId, resourceId, p)));
+    validateAddedPrivileges(securableType, name, changes);
+    validateNoDuplicateAddRemove(changes);
+    authorizeSpecialPrivilegeChanges(securableType, resourceId, changes);
+    Map<String, List<PermissionsChange>> changesByPrincipal =
+        changes.stream().collect(Collectors.groupingBy(PermissionsChange::getPrincipal));
+    Map<String, UUID> principalIdsByName =
+        changesByPrincipal.keySet().stream()
+            .collect(Collectors.toMap(principal -> principal, this::resolvePrincipalId));
+    Set<UUID> principalIds = new HashSet<>(principalIdsByName.values());
+    changesByPrincipal.forEach(
+        (principal, principalChanges) -> {
+          UUID principalId = principalIdsByName.get(principal);
+          Set<Privileges> addedPrivileges =
+              principalChanges.stream()
+                  .flatMap(change -> change.getAdd().stream())
+                  .map(Privileges::fromPrivilege)
+                  .filter(Objects::nonNull)
+                  .collect(Collectors.toSet());
+          Set<Privileges> removedPrivileges =
+              expandRemovedPrivileges(
+                  securableType,
+                  name,
+                  principalChanges.stream()
+                      .flatMap(change -> change.getRemove().stream())
+                      .toList());
+
+          // Explicit additions win over privileges introduced by expanding an ALL PRIVILEGES
+          // removal. Direct add/remove contradictions were rejected above.
+          removedPrivileges.removeAll(addedPrivileges);
+          removedPrivileges.forEach(
+              privilege -> revokeAuthorization(principalId, resourceId, privilege));
+          addedPrivileges.forEach(
+              privilege -> grantAuthorization(principalId, resourceId, privilege));
         });
 
     Map<UUID, List<Privileges>> authorizations = authorizer.listAuthorizations(resourceId);
@@ -330,13 +385,7 @@ public class PermissionService {
             .filter(entry -> principalIds.contains(entry.getKey()))
             .map(
                 entry -> {
-                  List<Privilege> privileges =
-                      entry.getValue().stream()
-                          .<Privilege>map(Privileges::toPrivilege)
-                          // mapping to Privilege may result in nulls since Privilege is a subset of
-                          // Privileges, so filter them out.
-                          .filter(Objects::nonNull)
-                          .toList();
+                  List<Privilege> privileges = toApiPrivileges(entry.getValue());
                   return new PrivilegeAssignment()
                       .principal(userRepository.getUser(entry.getKey().toString()).getEmail())
                       .privileges(privileges);
@@ -345,6 +394,128 @@ public class PermissionService {
             .collect(Collectors.toList());
 
     return HttpResponse.ofJson(new PermissionsList().privilegeAssignments(privilegeAssignments));
+  }
+
+  private UUID resolvePrincipalId(String principal) {
+    User user = userRepository.getUserByEmail(principal);
+    return UUID.fromString(Objects.requireNonNull(user.getId()));
+  }
+
+  private boolean grantAuthorization(
+      UUID principalId, UUID resourceId, Privileges privilege) {
+    return authorizer.grantAuthorization(principalId, resourceId, privilege);
+  }
+
+  /**
+   * EXTERNAL_USE_SCHEMA is deliberately harder to delegate than ordinary schema privileges. A
+   * schema owner or schema MANAGE grant can administer that schema, but only an administrator of
+   * the parent catalog may grant or revoke external clients' access to it.
+   */
+  private void authorizeSpecialPrivilegeChanges(
+      SecurableType securableType, UUID resourceId, List<PermissionsChange> changes) {
+    boolean changesExternalUseSchema =
+        securableType == SCHEMA
+            && changes.stream()
+                .anyMatch(
+                    change ->
+                        change.getAdd().contains(Privilege.EXTERNAL_USE_SCHEMA)
+                            || change.getRemove().contains(Privilege.EXTERNAL_USE_SCHEMA));
+    if (!changesExternalUseSchema) {
+      return;
+    }
+
+    UUID principalId = userRepository.findPrincipalId();
+    UUID catalogId = authorizer.getHierarchyParent(resourceId);
+    boolean allowed =
+        authorizer.authorize(
+                principalId, metastoreRepository.getMetastoreId(), Privileges.OWNER)
+            || (catalogId != null
+                && authorizer.authorizeAny(
+                    principalId, catalogId, Privileges.OWNER, Privileges.MANAGE));
+    if (!allowed) {
+      throw new BaseException(ErrorCode.PERMISSION_DENIED, "Access denied.");
+    }
+  }
+
+  private boolean revokeAuthorization(
+      UUID principalId, UUID resourceId, Privileges privilege) {
+    return authorizer.revokeAuthorization(principalId, resourceId, privilege);
+  }
+
+  private List<Privilege> toApiPrivileges(List<Privileges> storedPrivileges) {
+    return storedPrivileges.stream()
+        .<Privilege>map(Privileges::toPrivilege)
+        // Privileges is a superset of the public API enum (for example OWNER).
+        .filter(Objects::nonNull)
+        .toList();
+  }
+
+  private Set<Privileges> expandRemovedPrivileges(
+      SecurableType securableType, String name, List<Privilege> requestedPrivileges) {
+    Set<Privileges> removedPrivileges =
+        requestedPrivileges.stream()
+            .map(Privileges::fromPrivilege)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+    if (removedPrivileges.contains(Privileges.ALL_PRIVILEGES)) {
+      assignablePrivileges(securableType, name).stream()
+          .filter(PrivilegePolicy::isCoveredByAllPrivileges)
+          .forEach(removedPrivileges::add);
+    }
+    return removedPrivileges;
+  }
+
+  private void validateAddedPrivileges(
+      SecurableType securableType, String name, List<PermissionsChange> changes) {
+    changes.forEach(
+        change ->
+            change
+                .getAdd()
+                .forEach(privilege -> validatePrivilege(securableType, name, privilege)));
+  }
+
+  private void validateNoDuplicateAddRemove(List<PermissionsChange> changes) {
+    changes.stream()
+        .collect(Collectors.groupingBy(PermissionsChange::getPrincipal))
+        .forEach(
+            (principal, principalChanges) -> {
+              Set<Privilege> addedPrivileges =
+                  principalChanges.stream()
+                      .flatMap(change -> change.getAdd().stream())
+                      .collect(Collectors.toSet());
+              Set<Privilege> removedPrivileges =
+                  principalChanges.stream()
+                      .flatMap(change -> change.getRemove().stream())
+                      .collect(Collectors.toSet());
+              addedPrivileges.retainAll(removedPrivileges);
+              if (!addedPrivileges.isEmpty()) {
+                throw new BaseException(
+                    ErrorCode.INVALID_ARGUMENT,
+                    String.format(
+                        "Duplicate privileges to add and remove for principal '%s'.", principal));
+              }
+            });
+  }
+
+  private void validatePrivilege(
+      SecurableType securableType, String name, Privilege privilege) {
+    Privileges persistPrivilege = Privileges.fromPrivilege(privilege);
+    boolean isAssignable =
+        persistPrivilege != null
+            && assignablePrivileges(securableType, name).contains(persistPrivilege);
+    if (!isAssignable) {
+      throw new BaseException(
+          ErrorCode.INVALID_ARGUMENT,
+          String.format(
+              "Privilege '%s' cannot be assigned to securable type '%s'.",
+              privilege.getValue(), securableType.getValue()));
+    }
+  }
+
+  private Set<Privileges> assignablePrivileges(SecurableType securableType, String name) {
+    return securableType == TABLE
+        ? PrivilegePolicy.assignablePrivileges(tableRepository.getTable(name).getTableType())
+        : PrivilegePolicy.assignablePrivileges(securableType);
   }
 
   private UUID getResourceId(SecurableType securableType, String name) {

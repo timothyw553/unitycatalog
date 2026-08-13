@@ -1,13 +1,17 @@
 package io.unitycatalog.server.auth;
 
+import io.unitycatalog.server.persist.Repositories;
 import io.unitycatalog.server.persist.model.Privileges;
 import io.unitycatalog.server.persist.utils.HibernateConfigurator;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import org.apache.commons.io.IOUtils;
@@ -29,6 +33,8 @@ import org.casbin.jcasbin.model.Model;
  */
 public class JCasbinAuthorizer implements UnityCatalogAuthorizer {
   private final SyncedEnforcer enforcer;
+  private final UUID metastoreId;
+  private final ResourcePrivilegeResolver resourcePrivilegeResolver;
 
   private static final int PRINCIPAL_INDEX = 0;
   private static final int RESOURCE_INDEX = 1;
@@ -39,6 +45,34 @@ public class JCasbinAuthorizer implements UnityCatalogAuthorizer {
   private static final int HIERARCHY_CHILD_INDEX = 1;
 
   public JCasbinAuthorizer(HibernateConfigurator hibernateConfigurator) throws Exception {
+    this(hibernateConfigurator, null);
+  }
+
+  public JCasbinAuthorizer(HibernateConfigurator hibernateConfigurator, UUID metastoreId)
+      throws Exception {
+    this(
+        hibernateConfigurator,
+        metastoreId,
+        new PersistedResourcePrivilegeResolver(
+            hibernateConfigurator.getSessionFactory(), metastoreId));
+  }
+
+  public JCasbinAuthorizer(
+      HibernateConfigurator hibernateConfigurator, UUID metastoreId, Repositories repositories)
+      throws Exception {
+    this(
+        hibernateConfigurator,
+        metastoreId,
+        new PersistedResourcePrivilegeResolver(repositories, metastoreId));
+  }
+
+  JCasbinAuthorizer(
+      HibernateConfigurator hibernateConfigurator,
+      UUID metastoreId,
+      ResourcePrivilegeResolver resourcePrivilegeResolver)
+      throws Exception {
+    this.metastoreId = metastoreId;
+    this.resourcePrivilegeResolver = resourcePrivilegeResolver;
     Properties properties = hibernateConfigurator.getHibernateProperties();
     String driver = properties.getProperty("hibernate.connection.driver_class");
     String url = properties.getProperty("hibernate.connection.url");
@@ -123,23 +157,83 @@ public class JCasbinAuthorizer implements UnityCatalogAuthorizer {
 
   @Override
   public boolean authorize(UUID principal, UUID resource, Privileges action) {
-    return enforcer.enforce(principal.toString(), resource.toString(), action.toString());
+    if (action == Privileges.OWNER) {
+      return hasDirectAuthorization(principal, resource, action);
+    }
+
+    List<UUID> resourcePath = getResourcePath(resource);
+    for (int index = 0; index < resourcePath.size(); index++) {
+      UUID grantingResource = resourcePath.get(index);
+      boolean isMetastoreAncestor =
+          index > 0 && metastoreId != null && metastoreId.equals(grantingResource);
+      if (isMetastoreAncestor) {
+        // Metastore privileges do not normally inherit. READ_METADATA is the one exception.
+        if (action == Privileges.READ_METADATA
+            && hasDirectAuthorization(principal, grantingResource, Privileges.READ_METADATA)) {
+          return true;
+        }
+        continue;
+      }
+      if (hasDirectOrCompositeAuthorization(principal, resource, grantingResource, action)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   @Override
   public boolean authorizeAny(UUID principal, UUID resource, Privileges... actions) {
-    return Arrays.stream(actions)
-        .anyMatch(
-            action ->
-                enforcer.enforce(principal.toString(), resource.toString(), action.toString()));
+    return Arrays.stream(actions).anyMatch(action -> authorize(principal, resource, action));
   }
 
   @Override
   public boolean authorizeAll(UUID principal, UUID resource, Privileges... actions) {
-    return Arrays.stream(actions)
-        .allMatch(
-            action ->
-                enforcer.enforce(principal.toString(), resource.toString(), action.toString()));
+    return Arrays.stream(actions).allMatch(action -> authorize(principal, resource, action));
+  }
+
+  private List<UUID> getResourcePath(UUID resource) {
+    List<UUID> path = new ArrayList<>();
+    Set<UUID> visited = new HashSet<>();
+    UUID current = resource;
+    while (current != null && visited.add(current)) {
+      path.add(current);
+      current = getHierarchyParent(current);
+    }
+    // Catalogs and other top-level securables predate the hierarchy graph and are not persisted
+    // with an explicit metastore edge. Treat the configured metastore as their logical root so
+    // its READ_METADATA grant can still apply globally.
+    if (metastoreId != null && visited.add(metastoreId)) {
+      path.add(metastoreId);
+    }
+    return path;
+  }
+
+  private boolean hasDirectOrCompositeAuthorization(
+      UUID principal, UUID requestedResource, UUID grantingResource, Privileges action) {
+    if (!requestedResource.equals(grantingResource)
+        && !resourcePrivilegeResolver.isApplicable(requestedResource, action)) {
+      return false;
+    }
+    return hasDirectAuthorization(principal, grantingResource, action)
+        || (hasDirectAuthorization(principal, grantingResource, Privileges.ALL_PRIVILEGES)
+            && isCoveredByAllPrivileges(requestedResource, grantingResource, action))
+        || (PrivilegePolicy.isCoveredByManage(action)
+            && hasDirectAuthorization(principal, grantingResource, Privileges.MANAGE));
+  }
+
+  private boolean isCoveredByAllPrivileges(
+      UUID requestedResource, UUID grantingResource, Privileges action) {
+    if (!PrivilegePolicy.isCoveredByAllPrivileges(action)
+        || !resourcePrivilegeResolver.isApplicable(requestedResource, action)) {
+      return false;
+    }
+    // BROWSE is inherited from catalogs, but cannot be granted on their schema or leaf children.
+    return action != Privileges.BROWSE
+        || resourcePrivilegeResolver.isAssignable(grantingResource, action);
+  }
+
+  private boolean hasDirectAuthorization(UUID principal, UUID resource, Privileges action) {
+    return enforcer.enforce(principal.toString(), resource.toString(), action.toString());
   }
 
   @Override

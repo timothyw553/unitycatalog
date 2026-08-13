@@ -95,16 +95,20 @@ public class SchemaService extends AuthorizedService {
   @Get("")
   @AuthorizeExpression("""
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #schema, USE_SCHEMA) &&
-          #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG))
+      #authorize(#principal, #metastore, READ_METADATA) ||
+      #authorizeAny(#principal, #catalog, OWNER, READ_METADATA) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA, READ_METADATA))
       """)
   @ResponseAuthorizeFilter
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse listSchemas(
       @Param("catalog_name") @AuthorizeResourceKey(CATALOG) String catalogName,
       @Param("max_results") Optional<Integer> maxResults,
-      @Param("page_token") Optional<String> pageToken) {
+      @Param("page_token") Optional<String> pageToken,
+      @Param("include_browse")
+      @AuthorizeKey(key = "include_browse")
+      Optional<Boolean> includeBrowse) {
     ListSchemasResponse listSchemasResponse =
         schemaRepository.listSchemas(catalogName, maxResults, pageToken);
     applyResponseFilter(SecurableType.SCHEMA, listSchemasResponse.getSchemas());
@@ -114,38 +118,42 @@ public class SchemaService extends AuthorizedService {
   @Get("/{full_name}")
   @AuthorizeExpression("""
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
-          #authorizeAny(#principal, #catalog, USE_CATALOG))
+      #authorize(#principal, #metastore, READ_METADATA) ||
+      #authorizeAny(#principal, #catalog, OWNER, READ_METADATA) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA, READ_METADATA))
       """)
+  @ResponseAuthorizeFilter
   @AuthorizeResourceKey(METASTORE)
-  public HttpResponse getSchema(@Param("full_name") @AuthorizeResourceKey(SCHEMA) String fullName) {
-    return HttpResponse.ofJson(schemaRepository.getSchema(fullName));
+  public HttpResponse getSchema(
+      @Param("full_name") @AuthorizeResourceKey(SCHEMA) String fullName,
+      @Param("include_browse")
+      @AuthorizeKey(key = "include_browse")
+      Optional<Boolean> includeBrowse) {
+    SchemaInfo schemaInfo = schemaRepository.getSchema(fullName);
+    return HttpResponse.ofJson(applyResponseFilter(SecurableType.SCHEMA, schemaInfo));
   }
 
   @Patch("/{full_name}")
   @AuthorizeExpression("""
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #schema, OWNER) ||
-      #authorizeAll(#principal, #catalog, USE_CATALOG, USE_SCHEMA) ||
-      (#authorize(#principal, #schema, USE_SCHEMA) &&
-          #authorize(#principal, #catalog, USE_CATALOG))
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE))
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateSchema(
       @Param("full_name") @AuthorizeResourceKey(SCHEMA) String fullName,
       UpdateSchema updateSchema) {
-    // TODO: This method does not adhere to the complete access control rules of the Databricks
-    // Unity Catalog
     return HttpResponse.ofJson(schemaRepository.updateSchema(fullName, updateSchema));
   }
 
   @Delete("/{full_name}")
   @AuthorizeExpression("""
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #schema, OWNER) &&
-          #authorizeAny(#principal, #catalog, USE_CATALOG))
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE))
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse deleteSchema(
@@ -165,4 +173,3 @@ public class SchemaService extends AuthorizedService {
   }
 
 }
-

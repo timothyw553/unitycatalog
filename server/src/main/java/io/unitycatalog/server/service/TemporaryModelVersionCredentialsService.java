@@ -45,7 +45,7 @@ public class TemporaryModelVersionCredentialsService {
       #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
       (#operation == 'READ_MODEL_VERSION'
         ? #authorizeAny(#principal, #registered_model, OWNER, EXECUTE)
-        : #authorize(#principal, #registered_model, OWNER))
+        : #authorizeAny(#principal, #registered_model, OWNER, CREATE_MODEL_VERSION))
       """)
   public HttpResponse generateTemporaryModelVersionCredentials(
       @AuthorizeResourceKeys({

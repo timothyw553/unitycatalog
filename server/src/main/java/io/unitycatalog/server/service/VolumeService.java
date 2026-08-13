@@ -110,17 +110,29 @@ public class VolumeService extends AuthorizedService {
     return HttpResponse.ofJson(volumeInfo);
   }
 
-  private static final String LIST_AND_GET_AUTH_EXPRESSION = """
-      #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #schema, OWNER) && #authorize(#principal, #catalog, USE_CATALOG)) ||
-      (#authorize(#principal, #schema, USE_SCHEMA) &&
-          #authorize(#principal, #catalog, USE_CATALOG) &&
-          #authorizeAny(#principal, #volume, OWNER, READ_VOLUME))
+  private static final String GET_AUTH_EXPRESSION = """
+      #authorizeAny(#principal, #metastore, OWNER, READ_METADATA) ||
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE, READ_METADATA) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE, READ_METADATA)) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorize(#principal, #schema, USE_SCHEMA) &&
+          #authorizeAny(#principal, #volume, OWNER, READ_VOLUME, MANAGE, READ_METADATA))
+      """;
+
+  private static final String LIST_AUTH_EXPRESSION = """
+      #authorizeAny(#principal, #metastore, OWNER, READ_METADATA) ||
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE, READ_METADATA) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE, READ_METADATA)) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorize(#principal, #schema, USE_SCHEMA) &&
+          (#authorizeAny(#principal, #volume, OWNER, READ_VOLUME, MANAGE, READ_METADATA) ||
+            #authorizeDirectAny(#principal, #volume, WRITE_VOLUME, APPLY_TAG)))
       """;
 
   @Get("")
-  @AuthorizeExpression(LIST_AND_GET_AUTH_EXPRESSION)
+  @AuthorizeExpression(LIST_AUTH_EXPRESSION)
   @ResponseAuthorizeFilter
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse listVolumes(
@@ -128,7 +140,9 @@ public class VolumeService extends AuthorizedService {
       @Param("schema_name") @AuthorizeResourceKey(SCHEMA) String schemaName,
       @Param("max_results") Optional<Integer> maxResults,
       @Param("page_token") Optional<String> pageToken,
-      @Param("include_browse") Optional<Boolean> includeBrowse) {
+      @Param("include_browse")
+      @AuthorizeKey(key = "include_browse")
+      Optional<Boolean> includeBrowse) {
     ListVolumesResponseContent listVolumesResponse = volumeRepository.listVolumes(
         catalogName, schemaName, maxResults, pageToken, includeBrowse);
     applyResponseFilter(SecurableType.VOLUME, listVolumesResponse.getVolumes());
@@ -136,19 +150,26 @@ public class VolumeService extends AuthorizedService {
   }
 
   @Get("/{full_name}")
-  @AuthorizeExpression(LIST_AND_GET_AUTH_EXPRESSION)
+  @AuthorizeExpression(GET_AUTH_EXPRESSION)
+  @ResponseAuthorizeFilter
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse getVolume(
       @Param("full_name") @AuthorizeResourceKey(VOLUME) String fullName,
-      @Param("include_browse") Optional<Boolean> includeBrowse) {
-    return HttpResponse.ofJson(volumeRepository.getVolume(fullName));
+      @Param("include_browse")
+      @AuthorizeKey(key = "include_browse")
+      Optional<Boolean> includeBrowse) {
+    VolumeInfo volumeInfo = volumeRepository.getVolume(fullName);
+    return HttpResponse.ofJson(applyResponseFilter(SecurableType.VOLUME, volumeInfo));
   }
 
   @Patch("/{full_name}")
   @AuthorizeExpression("""
-      (#authorize(#principal, #volume, OWNER) &&
-          #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
-          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA))
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE)) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorize(#principal, #schema, USE_SCHEMA) &&
+          #authorizeAny(#principal, #volume, OWNER, MANAGE))
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateVolume(
@@ -159,11 +180,12 @@ public class VolumeService extends AuthorizedService {
 
   @Delete("/{full_name}")
   @AuthorizeExpression("""
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #schema, OWNER) && #authorize(#principal, #catalog, USE_CATALOG)) ||
-      (#authorize(#principal, #volume, OWNER) &&
-          #authorize(#principal, #catalog, USE_CATALOG) &&
-          #authorize(#principal, #schema, USE_SCHEMA))
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE)) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorize(#principal, #schema, USE_SCHEMA) &&
+          #authorizeAny(#principal, #volume, OWNER, MANAGE))
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse deleteVolume(
@@ -179,4 +201,3 @@ public class VolumeService extends AuthorizedService {
   }
 
 }
-

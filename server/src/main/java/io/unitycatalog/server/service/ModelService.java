@@ -10,6 +10,7 @@ import com.linecorp.armeria.server.annotation.Patch;
 import com.linecorp.armeria.server.annotation.Post;
 import io.unitycatalog.server.auth.UnityCatalogAuthorizer;
 import io.unitycatalog.server.auth.annotation.AuthorizeExpression;
+import io.unitycatalog.server.auth.annotation.AuthorizeKey;
 import io.unitycatalog.server.auth.annotation.ResponseAuthorizeFilter;
 import io.unitycatalog.server.auth.annotation.AuthorizeResourceKey;
 import io.unitycatalog.server.auth.annotation.AuthorizeResourceKeys;
@@ -43,6 +44,26 @@ import static io.unitycatalog.server.model.SecurableType.SCHEMA;
 @ExceptionHandler(GlobalExceptionHandler.class)
 public class ModelService extends AuthorizedService {
 
+  private static final String CREATE_OR_FINALIZE_MODEL_VERSION_AUTH_EXPRESSION =
+      """
+      #authorizeAny(#principal, #registered_model, OWNER, CREATE_MODEL_VERSION) &&
+          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
+          #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG)
+      """;
+
+  private static final String READ_MODEL_VERSION_AUTH_EXPRESSION =
+      """
+      #authorizeAny(#principal, #metastore, OWNER, READ_METADATA) ||
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE, READ_METADATA) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE, READ_METADATA)) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorize(#principal, #schema, USE_SCHEMA) &&
+          #authorizeAny(#principal, #registered_model, OWNER, EXECUTE, MANAGE, READ_METADATA)) ||
+      (#include_browse == 'true' &&
+          #authorize(#principal, #registered_model, BROWSE))
+      """;
+
   private final ModelRepository modelRepository;
   private final SchemaRepository schemaRepository;
   private final CatalogRepository catalogRepository;
@@ -65,9 +86,7 @@ public class ModelService extends AuthorizedService {
       (#authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
           #authorize(#principal, #schema, OWNER)) ||
       (#authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
-          #authorizeAll(#principal, #schema, USE_SCHEMA, CREATE_MODEL)) ||
-      (#authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
-          #authorizeAll(#principal, #schema, USE_SCHEMA, CREATE_FUNCTION))
+          #authorizeAll(#principal, #schema, USE_SCHEMA, CREATE_MODEL))
       """)
   public HttpResponse createRegisteredModel(
       @AuthorizeResourceKeys({
@@ -89,12 +108,13 @@ public class ModelService extends AuthorizedService {
   }
 
   private static final String LIST_AND_GET_AUTH_EXPRESSION = """
-      #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #catalog, USE_CATALOG) && #authorize(#principal, #schema, OWNER)) ||
-      (#authorizeAny(#principal, #registered_model, OWNER, EXECUTE) &&
+      #authorizeAny(#principal, #metastore, OWNER, READ_METADATA) ||
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE, READ_METADATA) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE, READ_METADATA)) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
           #authorize(#principal, #schema, USE_SCHEMA) &&
-          #authorize(#principal, #catalog, USE_CATALOG))
+          #authorizeAny(#principal, #registered_model, OWNER, EXECUTE, MANAGE, READ_METADATA))
       """;
 
   @Get("")
@@ -105,7 +125,10 @@ public class ModelService extends AuthorizedService {
       @Param("catalog_name") Optional<String> catalogName,
       @Param("schema_name") Optional<String> schemaName,
       @Param("max_results") Optional<Integer> maxResults,
-      @Param("page_token") Optional<String> pageToken) {
+      @Param("page_token") Optional<String> pageToken,
+      @Param("include_browse")
+      @AuthorizeKey(key = "include_browse")
+      Optional<Boolean> includeBrowse) {
     ListRegisteredModelsResponse listRegisteredModelsResponse =
         modelRepository.listRegisteredModels(catalogName, schemaName, maxResults, pageToken);
     applyResponseFilter(
@@ -115,19 +138,27 @@ public class ModelService extends AuthorizedService {
 
   @Get("/{full_name}")
   @AuthorizeExpression(LIST_AND_GET_AUTH_EXPRESSION)
+  @ResponseAuthorizeFilter
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse getRegisteredModel(
-      @Param("full_name") @AuthorizeResourceKey(REGISTERED_MODEL) String fullNameArg) {
+      @Param("full_name") @AuthorizeResourceKey(REGISTERED_MODEL) String fullNameArg,
+      @Param("include_browse")
+      @AuthorizeKey(key = "include_browse")
+      Optional<Boolean> includeBrowse) {
     assert fullNameArg != null;
     RegisteredModelInfo registeredModelInfo = modelRepository.getRegisteredModel(fullNameArg);
-    return HttpResponse.ofJson(registeredModelInfo);
+    return HttpResponse.ofJson(
+        applyResponseFilter(SecurableType.REGISTERED_MODEL, registeredModelInfo));
   }
 
   @Patch("/{full_name}")
   @AuthorizeExpression("""
-      (#authorize(#principal, #registered_model, OWNER) &&
-          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
-          #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG))
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE)) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorize(#principal, #schema, USE_SCHEMA) &&
+          #authorizeAny(#principal, #registered_model, OWNER, MANAGE))
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateRegisteredModel(
@@ -142,11 +173,12 @@ public class ModelService extends AuthorizedService {
   @Delete("/{full_name}")
   @AuthorizeExpression("""
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #catalog, USE_CATALOG) && #authorize(#principal, #schema, OWNER)) ||
-      (#authorize(#principal, #registered_model, OWNER) &&
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE)) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
           #authorize(#principal, #schema, USE_SCHEMA) &&
-          #authorize(#principal, #catalog, USE_CATALOG))
+          #authorizeAny(#principal, #registered_model, OWNER, MANAGE))
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse deleteRegisteredModel(
@@ -164,11 +196,7 @@ public class ModelService extends AuthorizedService {
   }
 
   @Post("/versions")
-  @AuthorizeExpression("""
-      (#authorize(#principal, #registered_model, OWNER) &&
-          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
-          #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG))
-      """)
+  @AuthorizeExpression(CREATE_OR_FINALIZE_MODEL_VERSION_AUTH_EXPRESSION)
   public HttpResponse createModelVersion(
       @AuthorizeResourceKeys({
         @AuthorizeResourceKey(value = CATALOG, key = "catalog_name"),
@@ -187,35 +215,25 @@ public class ModelService extends AuthorizedService {
   }
 
   @Get("/{full_name}/versions")
-  @AuthorizeExpression("""
-      #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #catalog, USE_CATALOG) && #authorize(#principal, #schema, OWNER)) ||
-      (#authorizeAny(#principal, #registered_model, OWNER, EXECUTE) &&
-          #authorize(#principal, #schema, USE_SCHEMA) &&
-          #authorize(#principal, #catalog, USE_CATALOG))
-      """)
+  @AuthorizeExpression(READ_MODEL_VERSION_AUTH_EXPRESSION)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse listModelVersions(
       @Param("full_name") @AuthorizeResourceKey(REGISTERED_MODEL) String fullName,
       @Param("max_results") Optional<Integer> maxResults,
-      @Param("page_token") Optional<String> pageToken) {
+      @Param("page_token") Optional<String> pageToken,
+      @Param("include_browse")
+          @AuthorizeKey(key = "include_browse") Optional<Boolean> includeBrowse) {
     return HttpResponse.ofJson(modelRepository.listModelVersions(fullName, maxResults, pageToken));
   }
 
   @Get("/{full_name}/versions/{version}")
-  @AuthorizeExpression("""
-      #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #catalog, USE_CATALOG) && #authorize(#principal, #schema, OWNER)) ||
-      (#authorizeAny(#principal, #registered_model, OWNER, EXECUTE) &&
-          #authorize(#principal, #schema, USE_SCHEMA) &&
-          #authorize(#principal, #catalog, USE_CATALOG))
-      """)
+  @AuthorizeExpression(READ_MODEL_VERSION_AUTH_EXPRESSION)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse getModelVersion(
       @Param("full_name") @AuthorizeResourceKey(REGISTERED_MODEL) String fullName,
-      @Param("version") Long version) {
+      @Param("version") Long version,
+      @Param("include_browse")
+          @AuthorizeKey(key = "include_browse") Optional<Boolean> includeBrowse) {
     assert fullName != null && version != null;
     ModelVersionInfo modelVersionInfo = modelRepository.getModelVersion(fullName, version);
     return HttpResponse.ofJson(modelVersionInfo);
@@ -223,9 +241,12 @@ public class ModelService extends AuthorizedService {
 
   @Patch("/{full_name}/versions/{version}")
   @AuthorizeExpression("""
-      (#authorize(#principal, #registered_model, OWNER) &&
-          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
-          #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG))
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE)) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorize(#principal, #schema, USE_SCHEMA) &&
+          #authorizeAny(#principal, #registered_model, OWNER, MANAGE))
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateModelVersion(
@@ -241,11 +262,12 @@ public class ModelService extends AuthorizedService {
   @Delete("/{full_name}/versions/{version}")
   @AuthorizeExpression("""
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #catalog, USE_CATALOG) && #authorize(#principal, #schema, OWNER)) ||
-      (#authorize(#principal, #registered_model, OWNER) &&
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE)) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
           #authorize(#principal, #schema, USE_SCHEMA) &&
-          #authorize(#principal, #catalog, USE_CATALOG))
+          #authorizeAny(#principal, #registered_model, OWNER, MANAGE))
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse deleteModelVersion(
@@ -256,20 +278,16 @@ public class ModelService extends AuthorizedService {
   }
 
   @Patch("/{full_name}/versions/{version}/finalize")
-  @AuthorizeExpression("""
-      (#authorize(#principal, #registered_model, OWNER) &&
-          #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
-          #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG))
-      """)
+  @AuthorizeExpression(CREATE_OR_FINALIZE_MODEL_VERSION_AUTH_EXPRESSION)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse finalizeModelVersion(
       @Param("full_name") @AuthorizeResourceKey(REGISTERED_MODEL) String fullName,
+      @Param("version") Long version,
       FinalizeModelVersion finalizeModelVersion) {
     assert finalizeModelVersion != null;
     ModelVersionInfo finalizeModelVersionResponse =
-        modelRepository.finalizeModelVersion(finalizeModelVersion);
+        modelRepository.finalizeModelVersion(fullName, version);
     return HttpResponse.ofJson(finalizeModelVersionResponse);
   }
 
 }
-

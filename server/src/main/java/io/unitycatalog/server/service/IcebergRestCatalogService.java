@@ -1,6 +1,9 @@
 package io.unitycatalog.server.service;
 
+import static io.unitycatalog.server.model.SecurableType.CATALOG;
 import static io.unitycatalog.server.model.SecurableType.METASTORE;
+import static io.unitycatalog.server.model.SecurableType.SCHEMA;
+import static io.unitycatalog.server.model.SecurableType.TABLE;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.linecorp.armeria.common.HttpResponse;
@@ -11,6 +14,8 @@ import com.linecorp.armeria.server.annotation.Head;
 import com.linecorp.armeria.server.annotation.Param;
 import com.linecorp.armeria.server.annotation.Post;
 import com.linecorp.armeria.server.annotation.ProducesJson;
+import io.unitycatalog.server.auth.AuthorizeExpressions;
+import io.unitycatalog.server.auth.UnityCatalogAuthorizer;
 import io.unitycatalog.server.auth.annotation.AuthorizeExpression;
 import io.unitycatalog.server.auth.annotation.AuthorizeResourceKey;
 import io.unitycatalog.server.exception.IcebergRestExceptionHandler;
@@ -18,18 +23,22 @@ import io.unitycatalog.server.model.ListSchemasResponse;
 import io.unitycatalog.server.model.ListTablesResponse;
 import io.unitycatalog.server.model.SchemaInfo;
 import io.unitycatalog.server.model.TableInfo;
+import io.unitycatalog.server.persist.MetastoreRepository;
 import io.unitycatalog.server.persist.Repositories;
 import io.unitycatalog.server.persist.TableRepository;
+import io.unitycatalog.server.persist.model.Privileges;
 import io.unitycatalog.server.service.iceberg.MetadataService;
 import io.unitycatalog.server.service.iceberg.TableConfigService;
 import io.unitycatalog.server.utils.JsonUtils;
 import io.unitycatalog.server.utils.NormalizedURL;
+import io.unitycatalog.server.utils.ServerProperties;
 import io.unitycatalog.server.utils.ValidationUtils;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.catalog.Namespace;
@@ -47,7 +56,7 @@ import org.hibernate.Session;
 import org.hibernate.SessionFactory;
 
 @ExceptionHandler(IcebergRestExceptionHandler.class)
-public class IcebergRestCatalogService {
+public class IcebergRestCatalogService extends AuthorizedService {
 
   private static final String PREFIX_BASE = "catalogs/";
 
@@ -65,18 +74,23 @@ public class IcebergRestCatalogService {
   private final TableConfigService tableConfigService;
   private final MetadataService metadataService;
   private final TableRepository tableRepository;
+  private final MetastoreRepository metastoreRepository;
   private final SessionFactory sessionFactory;
 
   public IcebergRestCatalogService(
+      UnityCatalogAuthorizer authorizer,
       SchemaService schemaService,
       TableConfigService tableConfigService,
       MetadataService metadataService,
-      Repositories repositories) {
+      Repositories repositories,
+      ServerProperties serverProperties) {
+    super(authorizer, repositories, serverProperties);
     // TODO: avoid this service to service dependency
     this.schemaService = schemaService;
     this.tableConfigService = tableConfigService;
     this.metadataService = metadataService;
     this.tableRepository = repositories.getTableRepository();
+    this.metastoreRepository = repositories.getMetastoreRepository();
     this.sessionFactory = repositories.getSessionFactory();
   }
 
@@ -115,7 +129,8 @@ public class IcebergRestCatalogService {
     } else {
       String respContent =
           schemaService
-              .listSchemas(catalog, Optional.of(Integer.MAX_VALUE), Optional.empty())
+              .listSchemas(
+                  catalog, Optional.of(Integer.MAX_VALUE), Optional.empty(), Optional.empty())
               .aggregate()
               .join()
               .contentUtf8();
@@ -139,7 +154,8 @@ public class IcebergRestCatalogService {
       @Param("catalog") String catalog, @Param("namespace") String namespace)
       throws JsonProcessingException {
     String schemaFullName = String.join(".", catalog, namespace);
-    String resp = schemaService.getSchema(schemaFullName).aggregate().join().contentUtf8();
+    String resp =
+        schemaService.getSchema(schemaFullName, Optional.empty()).aggregate().join().contentUtf8();
     return GetNamespaceResponse.builder()
         .withNamespace(Namespace.of(namespace))
         .setProperties(JsonUtils.getInstance().readValue(resp, SchemaInfo.class).getProperties())
@@ -169,16 +185,17 @@ public class IcebergRestCatalogService {
 
   @Get("/v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}")
   @ProducesJson
-  @AuthorizeExpression("#authorize(#principal, #metastore, OWNER)")
+  @AuthorizeExpression(AuthorizeExpressions.GET_TABLE)
   @AuthorizeResourceKey(METASTORE)
   public LoadTableResponse loadTable(
-      @Param("catalog") String catalog,
-      @Param("namespace") String namespace,
-      @Param("table") String table) {
+      @Param("catalog") @AuthorizeResourceKey(CATALOG) String catalog,
+      @Param("namespace") @AuthorizeResourceKey(SCHEMA) String namespace,
+      @Param("table") @AuthorizeResourceKey(TABLE) String table) {
     String metadataLocation;
     NormalizedURL tableLocation;
+    TableInfo tableInfo;
     try (Session session = sessionFactory.openSession()) {
-      TableInfo tableInfo = tableRepository.getTable(catalog + "." + namespace + "." + table);
+      tableInfo = tableRepository.getTable(catalog + "." + namespace + "." + table);
       tableLocation = NormalizedURL.from(tableInfo.getStorageLocation());
       metadataLocation =
           tableRepository.getTableUniformMetadataLocation(session, catalog, namespace, table);
@@ -193,12 +210,32 @@ public class IcebergRestCatalogService {
     ValidationUtils.checkArgument(
         tableLocation.equals(NormalizedURL.from(tableMetadata.location())),
         "Iceberg table location must match the registered table location.");
-    Map<String, String> config = tableConfigService.getTableConfig(tableLocation);
+    Map<String, String> config =
+        canVendTableConfig(tableInfo) ? tableConfigService.getTableConfig(tableLocation) : Map.of();
 
     return LoadTableResponse.builder()
         .withTableMetadata(tableMetadata)
         .addAllConfig(config)
         .build();
+  }
+
+  private boolean canVendTableConfig(TableInfo tableInfo) {
+    if (!serverProperties.isAuthorizationEnabled()) {
+      return true;
+    }
+
+    UUID principalId = userRepository.findPrincipalId();
+    UUID tableId = UUID.fromString(tableInfo.getTableId());
+    UUID schemaId = authorizer.getHierarchyParent(tableId);
+    UUID catalogId = schemaId == null ? null : authorizer.getHierarchyParent(schemaId);
+    return schemaId != null
+        && catalogId != null
+        && (authorizer.authorize(
+                principalId, metastoreRepository.getMetastoreId(), Privileges.OWNER)
+            || authorizer.authorize(principalId, schemaId, Privileges.EXTERNAL_USE_SCHEMA))
+        && authorizer.authorizeAny(principalId, catalogId, Privileges.OWNER, Privileges.USE_CATALOG)
+        && authorizer.authorizeAny(principalId, schemaId, Privileges.OWNER, Privileges.USE_SCHEMA)
+        && authorizer.authorizeAny(principalId, tableId, Privileges.OWNER, Privileges.SELECT);
   }
 
   @Get("/v1/catalogs/{catalog}/namespaces/{namespace}/views/{view}")

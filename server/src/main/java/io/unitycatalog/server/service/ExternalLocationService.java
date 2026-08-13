@@ -15,6 +15,7 @@ import com.linecorp.armeria.server.annotation.Patch;
 import com.linecorp.armeria.server.annotation.Post;
 import io.unitycatalog.server.auth.UnityCatalogAuthorizer;
 import io.unitycatalog.server.auth.annotation.AuthorizeExpression;
+import io.unitycatalog.server.auth.annotation.AuthorizeKey;
 import io.unitycatalog.server.auth.annotation.ResponseAuthorizeFilter;
 import io.unitycatalog.server.auth.annotation.AuthorizeResourceKey;
 import io.unitycatalog.server.exception.GlobalExceptionHandler;
@@ -63,8 +64,10 @@ public class ExternalLocationService extends AuthorizedService {
 
   private static final String LIST_AND_GET_AUTH_EXPRESSION = """
     #authorize(#principal, #metastore, OWNER) ||
+    #authorize(#principal, #metastore, READ_METADATA) ||
     #authorizeAny(#principal, #external_location, OWNER, READ_FILES, WRITE_FILES,
-      CREATE_EXTERNAL_TABLE, CREATE_EXTERNAL_VOLUME, CREATE_MANAGED_STORAGE)
+      CREATE_EXTERNAL_TABLE, CREATE_EXTERNAL_VOLUME, CREATE_MANAGED_STORAGE, EXTERNAL_USE_LOCATION,
+      APPLY_TAG, READ_METADATA)
     """;
 
   @Get("")
@@ -73,7 +76,10 @@ public class ExternalLocationService extends AuthorizedService {
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse listExternalLocations(
       @Param("max_results") Optional<Integer> maxResults,
-      @Param("page_token") Optional<String> pageToken) {
+      @Param("page_token") Optional<String> pageToken,
+      @Param("include_browse")
+      @AuthorizeKey(key = "include_browse")
+      Optional<Boolean> includeBrowse) {
     ListExternalLocationsResponse locations =
         externalLocationRepository.listExternalLocations(maxResults, pageToken);
     applyResponseFilter(SecurableType.EXTERNAL_LOCATION, locations.getExternalLocations());
@@ -82,16 +88,23 @@ public class ExternalLocationService extends AuthorizedService {
 
   @Get("/{name}")
   @AuthorizeExpression(LIST_AND_GET_AUTH_EXPRESSION)
+  @ResponseAuthorizeFilter
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse getExternalLocation(
-      @Param("name") @AuthorizeResourceKey(EXTERNAL_LOCATION) String name) {
-    return HttpResponse.ofJson(externalLocationRepository.getExternalLocation(name));
+      @Param("name") @AuthorizeResourceKey(EXTERNAL_LOCATION) String name,
+      @Param("include_browse")
+      @AuthorizeKey(key = "include_browse")
+      Optional<Boolean> includeBrowse) {
+    ExternalLocationInfo externalLocationInfo =
+        externalLocationRepository.getExternalLocation(name);
+    return HttpResponse.ofJson(
+        applyResponseFilter(SecurableType.EXTERNAL_LOCATION, externalLocationInfo));
   }
 
   @Patch("/{name}")
   @AuthorizeExpression("""
     #authorize(#principal, #metastore, OWNER) ||
-    (#authorize(#principal, #external_location, OWNER) &&
+    (#authorizeAny(#principal, #external_location, OWNER, MANAGE) &&
      (#credential == null ||
       #authorizeAny(#principal, #credential, OWNER, CREATE_EXTERNAL_LOCATION)))
     """)
@@ -107,7 +120,7 @@ public class ExternalLocationService extends AuthorizedService {
   @Delete("/{name}")
   @AuthorizeExpression("""
     #authorize(#principal, #metastore, OWNER) ||
-    #authorize(#principal, #external_location, OWNER)
+    #authorizeAny(#principal, #external_location, OWNER, MANAGE)
     """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse deleteExternalLocation(

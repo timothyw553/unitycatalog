@@ -28,6 +28,7 @@
 | **updated\_at** | **Long** | Time at which this function was last updated, in epoch milliseconds. | [optional] [default to null] |
 | **updated\_by** | **String** | Username of user who last modified function. | [optional] [default to null] |
 | **function\_id** | **String** | Id of Function, relative to parent schema. | [optional] [default to null] |
+| **browse\_only** | **Boolean** | Indicates whether the principal is limited to retrieving metadata for the associated object through the BROWSE privilege when include_browse is enabled in the request. | [optional] [default to null] |
 | **external\_language** | **String** | External language of the function. | [optional] [default to null] |
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)

@@ -27,13 +27,13 @@ public class SdkVolumeOperations implements VolumeOperations {
   public List<VolumeInfo> listVolumes(
       String catalogName, String schemaName, Optional<String> pageToken) throws ApiException {
     return volumesApi
-        .listVolumes(catalogName, schemaName, 100, pageToken.orElse(null))
+        .listVolumes(catalogName, schemaName, 100, pageToken.orElse(null), null)
         .getVolumes();
   }
 
   @Override
   public VolumeInfo getVolume(String volumeFullName) throws ApiException {
-    return volumesApi.getVolume(volumeFullName);
+    return volumesApi.getVolume(volumeFullName, null);
   }
 
   @Override

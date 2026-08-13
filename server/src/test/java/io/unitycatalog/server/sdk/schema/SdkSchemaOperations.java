@@ -25,12 +25,12 @@ public class SdkSchemaOperations implements SchemaOperations {
   @Override
   public List<SchemaInfo> listSchemas(String catalogName, Optional<String> pageToken)
       throws ApiException {
-    return schemasApi.listSchemas(catalogName, 100, pageToken.orElse(null)).getSchemas();
+    return schemasApi.listSchemas(catalogName, 100, pageToken.orElse(null), null).getSchemas();
   }
 
   @Override
   public SchemaInfo getSchema(String schemaFullName) throws ApiException {
-    return schemasApi.getSchema(schemaFullName);
+    return schemasApi.getSchema(schemaFullName, null);
   }
 
   @Override

@@ -14,6 +14,7 @@
 | **created\_by** | **String** | Username of external location creator. | [optional] [default to null] |
 | **updated\_at** | **Long** | Time at which external location this was last modified, in epoch milliseconds. | [optional] [default to null] |
 | **updated\_by** | **String** | Username of user who last modified the external location. | [optional] [default to null] |
+| **browse\_only** | **Boolean** | Indicates whether the principal is limited to retrieving metadata for the associated object through the BROWSE privilege when include_browse is enabled in the request. | [optional] [default to null] |
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

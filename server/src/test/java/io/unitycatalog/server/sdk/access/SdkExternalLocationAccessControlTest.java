@@ -193,6 +193,22 @@ public class SdkExternalLocationAccessControlTest extends SdkAccessControlBaseCR
     assertGetAndListPermissions(
         userBApi, List.of(userCLocation), List.of(adminLocation, userCLocation2));
 
+    // Every direct privilege except BROWSE exposes the ordinary external-location metadata.
+    grantPermissions(
+        USER_A_EMAIL,
+        SecurableType.EXTERNAL_LOCATION,
+        userCLocation2,
+        Privileges.APPLY_TAG);
+    assertGetAndListPermissions(
+        userAApi, List.of(adminLocation, userCLocation2), List.of(userCLocation));
+    grantPermissions(
+        USER_B_EMAIL,
+        SecurableType.EXTERNAL_LOCATION,
+        userCLocation2,
+        Privileges.EXTERNAL_USE_LOCATION);
+    assertGetAndListPermissions(
+        userBApi, List.of(userCLocation, userCLocation2), List.of(adminLocation));
+
     // Test deletion operation
 
     // User A and B can not delete any external location
@@ -235,16 +251,16 @@ public class SdkExternalLocationAccessControlTest extends SdkAccessControlBaseCR
       List<String> deniedExternalLocationNames) {
     // Test get operation
     for (String name : allowedExternalLocationNames) {
-      ExternalLocationInfo retrieved = api.getExternalLocation(name);
+      ExternalLocationInfo retrieved = api.getExternalLocation(name, null);
       assertThat(retrieved.getName()).isEqualTo(name);
       assertThat(retrieved.getId()).isNotNull().isNotEmpty();
       assertThat(retrieved.getUrl()).isNotNull().isNotEmpty();
     }
     for (String name : deniedExternalLocationNames) {
-      TestUtils.assertPermissionDenied(() -> api.getExternalLocation(name));
+      TestUtils.assertPermissionDenied(() -> api.getExternalLocation(name, null));
     }
     // Test list operation
-    ListExternalLocationsResponse response = api.listExternalLocations(100, null);
+    ListExternalLocationsResponse response = api.listExternalLocations(100, null, null);
     assertThat(response.getNextPageToken()).isNull();
     response.getExternalLocations().forEach(el -> assertThat(el.getId()).isNotNull().isNotEmpty());
     response.getExternalLocations().forEach(el -> assertThat(el.getUrl()).isNotNull().isNotEmpty());
@@ -285,7 +301,8 @@ public class SdkExternalLocationAccessControlTest extends SdkAccessControlBaseCR
   private void assertDeleteSuccess(ExternalLocationsApi api, String name) throws ApiException {
     api.deleteExternalLocation(name, false);
     // Verify deletion by checking that get fails with 404
-    assertApiException(() -> adminApi.getExternalLocation(name), ErrorCode.NOT_FOUND, "not found");
+    assertApiException(
+        () -> adminApi.getExternalLocation(name, null), ErrorCode.NOT_FOUND, "not found");
   }
 
   private void assertDeleteFailure(ExternalLocationsApi api, String name) {
@@ -380,14 +397,13 @@ public class SdkExternalLocationAccessControlTest extends SdkAccessControlBaseCR
                 .grantPermission(Privileges.CREATE_TABLE)
                 .grantPermission(Privileges.CREATE_VOLUME)
                 .build(),
-            // A user can create table or volume with only permission on schema if it's not using
-            // any external location (path is not registered)
+            // External table creation must use a registered location. External volume behavior is
+            // unchanged and still permits an unregistered path with the schema permission.
             CreateTableVolumeTestCase.builder()
                 .email("only_schema_perm_use_no_external_location@example.com")
                 .storageRoot("s3://some-other-unregistered-bucket/root")
                 .grantPermission(Privileges.CREATE_TABLE)
                 .grantPermission(Privileges.CREATE_VOLUME)
-                .expectCanCreateExternalTable(true)
                 .expectCanCreateExternalVolume(true)
                 .build(),
             // A user can't create table or volume with only permission on location
@@ -396,11 +412,27 @@ public class SdkExternalLocationAccessControlTest extends SdkAccessControlBaseCR
                 .grantPermission(Privileges.CREATE_EXTERNAL_TABLE)
                 .grantPermission(Privileges.CREATE_EXTERNAL_VOLUME)
                 .build(),
-            // A user can create table with both permissions on schema and location
+            // Normal create privileges are insufficient without EXTERNAL_USE_SCHEMA.
+            CreateTableVolumeTestCase.builder()
+                .email("missing_external_use_schema@example.com")
+                .grantPermission(Privileges.CREATE_EXTERNAL_TABLE)
+                .grantPermission(Privileges.CREATE_TABLE)
+                .grantPermission(Privileges.EXTERNAL_USE_LOCATION)
+                .build(),
+            // Normal create privileges are insufficient without EXTERNAL_USE_LOCATION.
+            CreateTableVolumeTestCase.builder()
+                .email("missing_external_use_location@example.com")
+                .grantPermission(Privileges.CREATE_EXTERNAL_TABLE)
+                .grantPermission(Privileges.CREATE_TABLE)
+                .grantPermission(Privileges.EXTERNAL_USE_SCHEMA)
+                .build(),
+            // A user can create a table with normal and explicit external-use permissions.
             CreateTableVolumeTestCase.builder()
                 .email("only_table@example.com")
                 .grantPermission(Privileges.CREATE_EXTERNAL_TABLE)
                 .grantPermission(Privileges.CREATE_TABLE)
+                .grantPermission(Privileges.EXTERNAL_USE_SCHEMA)
+                .grantPermission(Privileges.EXTERNAL_USE_LOCATION)
                 .expectCanCreateExternalTable(true)
                 .build(),
             // A user can create volume with both permissions on schema and location
@@ -417,14 +449,18 @@ public class SdkExternalLocationAccessControlTest extends SdkAccessControlBaseCR
                 .grantPermission(Privileges.CREATE_EXTERNAL_VOLUME)
                 .grantPermission(Privileges.CREATE_TABLE)
                 .grantPermission(Privileges.CREATE_VOLUME)
+                .grantPermission(Privileges.EXTERNAL_USE_SCHEMA)
+                .grantPermission(Privileges.EXTERNAL_USE_LOCATION)
                 .expectCanCreateExternalVolume(true)
                 .expectCanCreateExternalTable(true)
                 .build(),
-            // Location owner can create as long as it has the proper schema permissions
+            // Location ownership does not imply either explicit external-use privilege.
             CreateTableVolumeTestCase.builder()
                 .email(USER_C_EMAIL)
                 .grantPermission(Privileges.CREATE_TABLE)
                 .grantPermission(Privileges.CREATE_VOLUME)
+                .grantPermission(Privileges.EXTERNAL_USE_SCHEMA)
+                .grantPermission(Privileges.EXTERNAL_USE_LOCATION)
                 .expectCanCreateExternalTable(true)
                 .expectCanCreateExternalVolume(true)
                 .build());
@@ -448,9 +484,10 @@ public class SdkExternalLocationAccessControlTest extends SdkAccessControlBaseCR
       // Grant test case specific permissions
       for (Privileges privilege : testCase.grantPermissions) {
         switch (privilege) {
-          case CREATE_TABLE, CREATE_VOLUME -> grantPermissions(
+          case CREATE_TABLE, CREATE_VOLUME, EXTERNAL_USE_SCHEMA -> grantPermissions(
               testCase.email, SecurableType.SCHEMA, TestUtils.SCHEMA_FULL_NAME, privilege);
-          case CREATE_EXTERNAL_TABLE, CREATE_EXTERNAL_VOLUME -> grantPermissions(
+          case CREATE_EXTERNAL_TABLE, CREATE_EXTERNAL_VOLUME, EXTERNAL_USE_LOCATION ->
+              grantPermissions(
               testCase.email, SecurableType.EXTERNAL_LOCATION, externalLocationName, privilege);
           default -> throw new RuntimeException("Unknown privilege: " + privilege);
         }

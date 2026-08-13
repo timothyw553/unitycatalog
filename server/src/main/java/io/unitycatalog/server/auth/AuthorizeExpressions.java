@@ -24,39 +24,51 @@ public final class AuthorizeExpressions {
    * Authorization policy for reading table metadata (UC REST {@code GET /tables/{name}} and Delta
    * REST Catalog {@code loadTable}). Metastore admin and catalog owner pass unconditionally;
    * schema owner passes with catalog {@code USE_CATALOG}; regular callers need {@code USE_SCHEMA}
-   * + {@code USE_CATALOG} plus any of {@code OWNER} / {@code SELECT} / {@code MODIFY} on the
-   * table itself.
+   * + {@code USE_CATALOG} plus {@code OWNER}, {@code SELECT}, or {@code READ_METADATA} on the table
+   * itself. {@code READ_METADATA} follows the same parent visibility requirements, except for a
+   * metastore-level grant, which intentionally applies to every descendant. {@code MODIFY} alone
+   * does not reveal full table metadata.
    */
   public static final String GET_TABLE =
       """
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #schema, OWNER) && #authorize(#principal, #catalog, USE_CATALOG)) ||
+      #authorize(#principal, #metastore, READ_METADATA) ||
+      #authorizeAny(#principal, #catalog, OWNER, READ_METADATA) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, READ_METADATA)) ||
       (#authorize(#principal, #schema, USE_SCHEMA) &&
           #authorize(#principal, #catalog, USE_CATALOG) &&
-          #authorizeAny(#principal, #table, OWNER, SELECT, MODIFY))
+          #authorizeAny(#principal, #table, OWNER, SELECT, READ_METADATA))
       """;
 
   /**
    * Authorization policy for creating a staging table (UC REST {@code POST /staging-tables} and
    * UC Delta API {@code createStagingTable}). Catalog {@code USE_CATALOG}/{@code OWNER}
-   * plus either schema {@code OWNER} or schema {@code USE_SCHEMA}+{@code CREATE_TABLE}. Catalog
-   * OWNER alone is not sufficient.
+   * plus either schema {@code OWNER} or schema {@code USE_SCHEMA}+{@code CREATE_TABLE}. Because
+   * the response includes writable storage credentials, non-admin callers also need explicit
+   * schema {@code EXTERNAL_USE_SCHEMA}; schema ownership and {@code ALL_PRIVILEGES} do not imply
+   * it. Catalog OWNER alone is not sufficient.
    */
   public static final String CREATE_STAGING_TABLE =
       """
-      (#authorizeAny(#principal, #catalog, OWNER, USE_CATALOG)
-        && #authorize(#principal, #schema, OWNER)) ||
-      (#authorizeAny(#principal, #catalog, OWNER, USE_CATALOG)
-        && #authorizeAll(#principal, #schema, USE_SCHEMA, CREATE_TABLE))
+      (#authorize(#principal, #metastore, OWNER) ||
+        #authorize(#principal, #schema, EXTERNAL_USE_SCHEMA)) &&
+      ((#authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
+          #authorize(#principal, #schema, OWNER)) ||
+        (#authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
+          #authorizeAll(#principal, #schema, USE_SCHEMA, CREATE_TABLE)))
       """;
 
   /**
    * Authorization policy for creating a table (UC REST {@code POST /tables} and UC Delta API
    * {@code createTable}). Catalog {@code USE_CATALOG}/{@code OWNER} plus either schema
-   * {@code OWNER} or schema {@code USE_SCHEMA}+{@code CREATE_TABLE}. For EXTERNAL tables, the
-   * caller additionally needs {@code OWNER}/{@code CREATE_EXTERNAL_TABLE} on the external location
-   * (if one resolves) and the storage path must not overlap a data securable.
+   * {@code OWNER} or schema {@code USE_SCHEMA} plus the creation privilege for the requested
+   * subtype: {@code CREATE_MATERIALIZED_VIEW} for materialized views, otherwise {@code
+   * CREATE_TABLE}. For EXTERNAL tables, the caller additionally needs {@code OWNER}/{@code
+   * CREATE_EXTERNAL_TABLE} on the external location, explicit {@code EXTERNAL_USE_SCHEMA} and
+   * {@code EXTERNAL_USE_LOCATION}, and a storage path that does not overlap a data securable.
+   * Metastore owners retain their administrative bypass, but ownership of the schema or external
+   * location does not imply either external-use privilege.
    *
    * <p>The {@code #table_type} SpEL variable comes from {@code @AuthorizeKey(key = "table-type")};
    * kebab-case payload keys surface with hyphens mapped to underscores (see {@link
@@ -66,11 +78,17 @@ public final class AuthorizeExpressions {
       """
       #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
       (#authorize(#principal, #schema, OWNER) ||
-        #authorizeAll(#principal, #schema, USE_SCHEMA, CREATE_TABLE)) &&
+        (#authorize(#principal, #schema, USE_SCHEMA) &&
+          (#table_type == 'MATERIALIZED_VIEW'
+            ? #authorize(#principal, #schema, CREATE_MATERIALIZED_VIEW)
+            : #authorize(#principal, #schema, CREATE_TABLE)))) &&
       (#table_type != 'EXTERNAL' ||
         (#no_overlap_with_data_securable &&
-          (#external_location == null ||
-           #authorizeAny(#principal, #external_location, OWNER, CREATE_EXTERNAL_TABLE))))
+          (#authorize(#principal, #metastore, OWNER) ||
+            (#external_location != null &&
+              #authorizeAny(#principal, #external_location, OWNER, CREATE_EXTERNAL_TABLE) &&
+              #authorize(#principal, #schema, EXTERNAL_USE_SCHEMA) &&
+              #authorize(#principal, #external_location, EXTERNAL_USE_LOCATION)))))
       """;
 
   /**
@@ -78,14 +96,15 @@ public final class AuthorizeExpressions {
    * DeltaCommitsService.postCommit} and the Delta {@code updateTable}). The Delta {@code POST
    * /tables/{name}} endpoint covers both metadata-only updates (properties, columns, comment,
    * protocol, domain metadata) and CCv2 commits, so the privilege bundle is the same as the UC REST
-   * commit path: USE_CATALOG on catalog, USE_SCHEMA on schema, and MODIFY on the table (OWNER
-   * satisfies each tier).
+   * commit path: USE_CATALOG on catalog, USE_SCHEMA on schema, and both SELECT and MODIFY on the
+   * table (OWNER satisfies each tier).
    */
   public static final String UPDATE_TABLE =
       """
       #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
       #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
-      #authorizeAny(#principal, #table, OWNER, MODIFY)
+      (#authorize(#principal, #table, OWNER) ||
+          #authorizeAll(#principal, #table, SELECT, MODIFY))
       """;
 
   /**
@@ -95,11 +114,12 @@ public final class AuthorizeExpressions {
    */
   public static final String DELETE_TABLE =
       """
-      #authorize(#principal, #catalog, OWNER) ||
-      (#authorize(#principal, #schema, OWNER) && #authorize(#principal, #catalog, USE_CATALOG)) ||
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE) ||
+      (#authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #schema, OWNER, MANAGE)) ||
       (#authorize(#principal, #schema, USE_SCHEMA) &&
           #authorize(#principal, #catalog, USE_CATALOG) &&
-          #authorize(#principal, #table, OWNER))
+          #authorizeAny(#principal, #table, OWNER, MANAGE))
       """;
 
   /**
@@ -118,10 +138,13 @@ public final class AuthorizeExpressions {
    * Authorization policy for vending table credentials. Admin-above-the-table privileges on
    * their own are not sufficient; the caller must have an explicit table-level privilege
    * matching the requested operation. {@code READ} needs OWNER or SELECT; {@code READ_WRITE}
-   * needs OWNER, or both SELECT and MODIFY.
+   * needs OWNER, or both SELECT and MODIFY. Non-admin callers also need the explicit {@code
+   * EXTERNAL_USE_SCHEMA} privilege; schema ownership and {@code ALL_PRIVILEGES} do not imply it.
    */
   public static final String VEND_TABLE_CREDENTIAL =
       """
+      (#authorize(#principal, #metastore, OWNER) ||
+          #authorize(#principal, #schema, EXTERNAL_USE_SCHEMA)) &&
       #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
       #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
       (#operation == 'READ'

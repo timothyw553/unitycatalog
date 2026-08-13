@@ -74,41 +74,42 @@ public class SdkSchemaAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest
     grantPermissions(REGULAR_2, SecurableType.SCHEMA, "cat_pr1.sch_rg2", Privileges.USE_SCHEMA);
 
     // list schemas (admin) -> metastore admin -> allowed - list all
-    List<SchemaInfo> adminSchemas = adminSchemasApi.listSchemas("cat_pr1", null, null).getSchemas();
+    List<SchemaInfo> adminSchemas =
+        adminSchemasApi.listSchemas("cat_pr1", null, null, null).getSchemas();
     assertThat(adminSchemas).hasSizeGreaterThanOrEqualTo(2);
 
     // list schemas (principal-1) -> owner (catalog) -> allowed - list all
     List<SchemaInfo> principal1Schemas =
-        principal1SchemasApi.listSchemas("cat_pr1", null, null).getSchemas();
+        principal1SchemasApi.listSchemas("cat_pr1", null, null, null).getSchemas();
     assertThat(principal1Schemas).hasSizeGreaterThanOrEqualTo(2);
 
     // list schemas (regular-1) -> -> allowed - empty list
     List<SchemaInfo> regular1Schemas =
-        regular1SchemasApi.listSchemas("cat_pr1", null, null).getSchemas();
+        regular1SchemasApi.listSchemas("cat_pr1", null, null, null).getSchemas();
     assertThat(regular1Schemas).isEmpty();
 
     // list schemas (regular-2) -> -> USE SCHEMA - filtered list
     List<SchemaInfo> regular2Schemas =
-        regular2SchemasApi.listSchemas("cat_pr1", null, null).getSchemas();
+        regular2SchemasApi.listSchemas("cat_pr1", null, null, null).getSchemas();
     assertThat(regular2Schemas).hasSize(1);
     assertThat(regular2Schemas.get(0).getName()).isEqualTo("sch_rg2");
 
     // get schema (admin) -> metastore admin -> allowed
-    SchemaInfo schemaInfo = adminSchemasApi.getSchema("cat_pr1.sch_pr1");
+    SchemaInfo schemaInfo = adminSchemasApi.getSchema("cat_pr1.sch_pr1", null);
     assertThat(schemaInfo).isNotNull();
 
     // get schema (principal-1) -> owner -> allowed
-    SchemaInfo schemaInfoOwner = principal1SchemasApi.getSchema("cat_pr1.sch_pr1");
+    SchemaInfo schemaInfoOwner = principal1SchemasApi.getSchema("cat_pr1.sch_pr1", null);
     assertThat(schemaInfoOwner).isNotNull();
 
     // get schema (regular-1) -> -- -> denied
-    assertPermissionDenied(() -> regular1SchemasApi.getSchema("cat_pr1.sch_pr1"));
+    assertPermissionDenied(() -> regular1SchemasApi.getSchema("cat_pr1.sch_pr1", null));
 
     // give user USE SCHEMA on sch_rg2
     grantPermissions(REGULAR_2, SecurableType.SCHEMA, "cat_pr1.sch_pr1", Privileges.USE_SCHEMA);
 
     // get schema (regular-1) -> USE SCHEMA -> allowed
-    SchemaInfo schemaInfoRegular2 = regular2SchemasApi.getSchema("cat_pr1.sch_pr1");
+    SchemaInfo schemaInfoRegular2 = regular2SchemasApi.getSchema("cat_pr1.sch_pr1", null);
     assertThat(schemaInfoRegular2).isNotNull();
 
     // update schema (admin) -> metastore admin -> allowed
@@ -166,9 +167,18 @@ public class SdkSchemaAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest
     assertThat(schemaWithLoc1Info.getName()).isEqualTo("schema_with_location1");
 
     // Create a table, then a schema under the table. It should fail.
-    // First grant CREATE EXTERNAL TABLE permission
+    // First grant the external table and explicit external-use permissions.
     grantPermissions(
-        PRINCIPAL_1, SecurableType.EXTERNAL_LOCATION, "admin_el", Privileges.CREATE_EXTERNAL_TABLE);
+        PRINCIPAL_1,
+        SecurableType.EXTERNAL_LOCATION,
+        "admin_el",
+        Privileges.CREATE_EXTERNAL_TABLE,
+        Privileges.EXTERNAL_USE_LOCATION);
+    grantPermissions(
+        PRINCIPAL_1,
+        SecurableType.SCHEMA,
+        "cat_pr1.schema_with_location1",
+        Privileges.EXTERNAL_USE_SCHEMA);
 
     TablesApi principal1TablesApi =
         new TablesApi(TestUtils.createApiClient(createTestUserServerConfig(PRINCIPAL_1)));

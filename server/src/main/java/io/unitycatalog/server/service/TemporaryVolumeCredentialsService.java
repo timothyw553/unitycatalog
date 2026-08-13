@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.Set;
 
 import static io.unitycatalog.server.model.SecurableType.VOLUME;
+import static io.unitycatalog.server.model.SecurableType.METASTORE;
 import static io.unitycatalog.server.service.credential.CredentialContext.Privilege.SELECT;
 import static io.unitycatalog.server.service.credential.CredentialContext.Privilege.UPDATE;
 
@@ -38,12 +39,16 @@ public class TemporaryVolumeCredentialsService {
 
   @Post("")
   @AuthorizeExpression("""
+      (#authorize(#principal, #metastore, OWNER) ||
+          #authorize(#principal, #schema, EXTERNAL_USE_SCHEMA)) &&
       #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
       #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
       (#operation == 'READ_VOLUME'
         ? #authorizeAny(#principal, #volume, OWNER, READ_VOLUME)
-        : #authorize(#principal, #volume, OWNER))
+        : (#authorize(#principal, #volume, OWNER) ||
+           #authorizeAll(#principal, #volume, READ_VOLUME, WRITE_VOLUME)))
       """)
+  @AuthorizeResourceKey(METASTORE)
   public HttpResponse generateTemporaryVolumeCredential(
       @AuthorizeResourceKey(value = VOLUME, key = "volume_id")
       @AuthorizeKey(key = "operation")

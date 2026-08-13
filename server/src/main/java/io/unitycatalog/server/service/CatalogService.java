@@ -81,7 +81,7 @@ public class CatalogService extends AuthorizedService {
 
   private static final String LIST_AND_GET_AUTH_EXPRESSION = """
       #authorize(#principal, #metastore, OWNER) ||
-      #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG)
+      #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG, READ_METADATA)
       """;
 
   @Get("")
@@ -90,7 +90,10 @@ public class CatalogService extends AuthorizedService {
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse listCatalogs(
       @Param("max_results") Optional<Integer> maxResults,
-      @Param("page_token") Optional<String> pageToken) {
+      @Param("page_token") Optional<String> pageToken,
+      @Param("include_browse")
+      @AuthorizeKey(key = "include_browse")
+      Optional<Boolean> includeBrowse) {
     ListCatalogsResponse listCatalogsResponse = catalogRepository.listCatalogs(
         maxResults, pageToken);
     applyResponseFilter(SecurableType.CATALOG, listCatalogsResponse.getCatalogs());
@@ -99,14 +102,20 @@ public class CatalogService extends AuthorizedService {
 
   @Get("/{name}")
   @AuthorizeExpression(LIST_AND_GET_AUTH_EXPRESSION)
+  @ResponseAuthorizeFilter
   @AuthorizeResourceKey(METASTORE)
-  public HttpResponse getCatalog(@Param("name") @AuthorizeResourceKey(CATALOG) String name) {
-    return HttpResponse.ofJson(catalogRepository.getCatalog(name));
+  public HttpResponse getCatalog(
+      @Param("name") @AuthorizeResourceKey(CATALOG) String name,
+      @Param("include_browse")
+      @AuthorizeKey(key = "include_browse")
+      Optional<Boolean> includeBrowse) {
+    CatalogInfo catalogInfo = catalogRepository.getCatalog(name);
+    return HttpResponse.ofJson(applyResponseFilter(SecurableType.CATALOG, catalogInfo));
   }
 
   @Patch("/{name}")
   @AuthorizeExpression("""
-      #authorize(#principal, #catalog, OWNER)
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE)
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateCatalog(
@@ -118,7 +127,7 @@ public class CatalogService extends AuthorizedService {
   @Delete("/{name}")
   @AuthorizeExpression("""
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #catalog, OWNER)
+      #authorizeAny(#principal, #catalog, OWNER, MANAGE)
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse deleteCatalog(

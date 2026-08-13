@@ -4,7 +4,6 @@ import io.unitycatalog.server.exception.BaseException;
 import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.model.CreateModelVersion;
 import io.unitycatalog.server.model.CreateRegisteredModel;
-import io.unitycatalog.server.model.FinalizeModelVersion;
 import io.unitycatalog.server.model.ListModelVersionsResponse;
 import io.unitycatalog.server.model.ListRegisteredModelsResponse;
 import io.unitycatalog.server.model.ModelVersionInfo;
@@ -782,16 +781,7 @@ public class ModelRepository {
     session.remove(modelVersionInfoDAO);
   }
 
-  public ModelVersionInfo finalizeModelVersion(FinalizeModelVersion finalizeModelVersion) {
-    if (finalizeModelVersion.getFullName() == null) {
-      throw new BaseException(ErrorCode.INVALID_ARGUMENT, "No three tier full name specified.");
-    }
-    if (finalizeModelVersion.getVersion() == null) {
-      throw new BaseException(ErrorCode.INVALID_ARGUMENT, "No version specified.");
-    }
-
-    String fullName = finalizeModelVersion.getFullName();
-    Long version = finalizeModelVersion.getVersion();
+  public ModelVersionInfo finalizeModelVersion(String fullName, Long version) {
     LOGGER.info("Finalize Model Version: {}/{}", fullName, version);
     ModelVersionInfo modelVersionInfo;
     String callerId = IdentityUtils.findPrincipalEmailAddress();

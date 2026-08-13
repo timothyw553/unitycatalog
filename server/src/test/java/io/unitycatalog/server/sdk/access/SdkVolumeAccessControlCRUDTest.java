@@ -36,6 +36,52 @@ public class SdkVolumeAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest
 
   @Test
   @SneakyThrows
+  public void writeAndTagPrivilegesOnlyExposeVolumesInLists() {
+    createCommonTestUsers();
+    setupCommonCatalogAndSchema();
+
+    VolumesApi principal1VolumesApi =
+        new VolumesApi(TestUtils.createApiClient(createTestUserServerConfig(PRINCIPAL_1)));
+    VolumesApi regular1VolumesApi =
+        new VolumesApi(TestUtils.createApiClient(createTestUserServerConfig(REGULAR_1)));
+
+    grantPermissions(PRINCIPAL_1, SecurableType.CATALOG, "cat_pr1", Privileges.USE_CATALOG);
+    grantPermissions(PRINCIPAL_1, SecurableType.SCHEMA, "cat_pr1.sch_pr1", Privileges.USE_SCHEMA);
+    principal1VolumesApi.createVolume(
+        new CreateVolumeRequestContent()
+            .name("list_only_volume")
+            .catalogName("cat_pr1")
+            .schemaName("sch_pr1")
+            .volumeType(VolumeType.EXTERNAL)
+            .storageLocation(testDirectoryRoot.resolve("list_only_volume").toString()));
+
+    grantPermissions(REGULAR_1, SecurableType.CATALOG, "cat_pr1", Privileges.USE_CATALOG);
+    grantPermissions(REGULAR_1, SecurableType.SCHEMA, "cat_pr1.sch_pr1", Privileges.USE_SCHEMA);
+
+    String volumeName = "cat_pr1.sch_pr1.list_only_volume";
+    for (Privileges privilege : List.of(Privileges.WRITE_VOLUME, Privileges.APPLY_TAG)) {
+      grantPermissions(REGULAR_1, SecurableType.VOLUME, volumeName, privilege);
+      assertThat(listAllVolumes(regular1VolumesApi, "cat_pr1", "sch_pr1"))
+          .extracting(VolumeInfo::getFullName)
+          .containsExactly(volumeName);
+      assertPermissionDenied(() -> regular1VolumesApi.getVolume(volumeName, null));
+      revokePermissions(REGULAR_1, SecurableType.VOLUME, volumeName, privilege);
+    }
+
+    // These grants are list-only only when placed directly on the volume. Inherited schema grants
+    // must not reveal every child volume.
+    grantPermissions(
+        REGULAR_1,
+        SecurableType.SCHEMA,
+        "cat_pr1.sch_pr1",
+        Privileges.WRITE_VOLUME,
+        Privileges.APPLY_TAG);
+    assertThat(listAllVolumes(regular1VolumesApi, "cat_pr1", "sch_pr1")).isEmpty();
+    assertPermissionDenied(() -> regular1VolumesApi.getVolume(volumeName, null));
+  }
+
+  @Test
+  @SneakyThrows
   public void testVolumeAccess() {
     createCommonTestUsers();
     setupCommonCatalogAndSchema();
@@ -113,15 +159,21 @@ public class SdkVolumeAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest
     assertThat(principal1Volumes).hasSize(1);
 
     // get volume (principal-1) -> owner -> allowed
-    VolumeInfo volumeInfoOwner = principal1VolumesApi.getVolume("cat_pr1.sch_pr1.vol_adm");
+    VolumeInfo volumeInfoOwner = principal1VolumesApi.getVolume("cat_pr1.sch_pr1.vol_adm", null);
     assertThat(volumeInfoOwner).isNotNull();
 
     // get volume (admin) -> metastore admin -> allowed
-    VolumeInfo volumeInfoAdmin = adminVolumesApi.getVolume("cat_pr1.sch_pr1.vol_adm");
+    VolumeInfo volumeInfoAdmin = adminVolumesApi.getVolume("cat_pr1.sch_pr1.vol_adm", null);
     assertThat(volumeInfoAdmin).isNotNull();
 
     // get volume (regular-1) -> no permission -> denied
-    assertPermissionDenied(() -> regular1VolumesApi.getVolume("cat_pr1.sch_pr1.vol_adm"));
+    assertPermissionDenied(() -> regular1VolumesApi.getVolume("cat_pr1.sch_pr1.vol_adm", null));
+    grantPermissions(
+        REGULAR_1, SecurableType.VOLUME, "cat_pr1.sch_pr1.vol_adm", Privileges.READ_METADATA);
+    // A leaf metadata grant still needs visibility through its parent schema.
+    assertPermissionDenied(() -> regular1VolumesApi.getVolume("cat_pr1.sch_pr1.vol_adm", null));
+    grantPermissions(REGULAR_1, SecurableType.SCHEMA, "cat_pr1.sch_pr1", Privileges.USE_SCHEMA);
+    assertThat(regular1VolumesApi.getVolume("cat_pr1.sch_pr1.vol_adm", null)).isNotNull();
 
     // update volume (principal-1) -> catalog owner, schema owner, USE SCHEMA -> allowed
     VolumeInfo updatedVolume =
@@ -130,7 +182,7 @@ public class SdkVolumeAccessControlCRUDTest extends SdkAccessControlBaseCRUDTest
             new UpdateVolumeRequestContent().comment("principal update"));
     assertThat(updatedVolume.getComment()).isEqualTo("principal update");
 
-    // update volume (regular-1) -> not owner [catalog] -> denied
+    // READ_METADATA permits the get above but not this mutation.
     assertPermissionDenied(
         () ->
             regular1VolumesApi.updateVolume(

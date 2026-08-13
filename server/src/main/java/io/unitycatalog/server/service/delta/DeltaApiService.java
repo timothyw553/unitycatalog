@@ -178,6 +178,7 @@ public class DeltaApiService extends AuthorizedService {
   @Post("/delta/v1/catalogs/{catalog}/schemas/{schema}/staging-tables")
   @ProducesJson
   @AuthorizeExpression(AuthorizeExpressions.CREATE_STAGING_TABLE)
+  @AuthorizeResourceKey(METASTORE)
   public DeltaStagingTableResponse createStagingTable(
       @Param("catalog") @AuthorizeResourceKey(CATALOG) String catalog,
       @Param("schema") @AuthorizeResourceKey(SCHEMA) String schema,
@@ -223,6 +224,7 @@ public class DeltaApiService extends AuthorizedService {
   @Post("/delta/v1/catalogs/{catalog}/schemas/{schema}/tables")
   @ProducesJson
   @AuthorizeExpression(AuthorizeExpressions.CREATE_TABLE)
+  @AuthorizeResourceKey(METASTORE)
   public DeltaLoadTableResponse createTable(
       @Param("catalog") @AuthorizeResourceKey(CATALOG) String catalog,
       @Param("schema") @AuthorizeResourceKey(SCHEMA) String schema,
@@ -329,6 +331,7 @@ public class DeltaApiService extends AuthorizedService {
   @Get("/delta/v1/catalogs/{catalog}/schemas/{schema}/tables/{table}/credentials")
   @ProducesJson
   @AuthorizeExpression(AuthorizeExpressions.VEND_TABLE_CREDENTIAL)
+  @AuthorizeResourceKey(METASTORE)
   public DeltaCredentialsResponse getTableCredentials(
       @Param("catalog") @AuthorizeResourceKey(CATALOG) String catalog,
       @Param("schema") @AuthorizeResourceKey(SCHEMA) String schema,
@@ -347,7 +350,14 @@ public class DeltaApiService extends AuthorizedService {
    */
   @Get("/delta/v1/staging-tables/{table_id}/credentials")
   @ProducesJson
-  @AuthorizeExpression("#authorize(#principal, #table, OWNER)")
+  @AuthorizeExpression("""
+      (#authorize(#principal, #metastore, OWNER) ||
+        #authorize(#principal, #schema, EXTERNAL_USE_SCHEMA)) &&
+      #authorizeAny(#principal, #catalog, OWNER, USE_CATALOG) &&
+      #authorizeAny(#principal, #schema, OWNER, USE_SCHEMA) &&
+      #authorize(#principal, #table, OWNER)
+      """)
+  @AuthorizeResourceKey(METASTORE)
   public DeltaCredentialsResponse getStagingTableCredentials(
       @Param("table_id") @AuthorizeResourceKey(TABLE) String tableId) {
     NormalizedURL storageLocation =

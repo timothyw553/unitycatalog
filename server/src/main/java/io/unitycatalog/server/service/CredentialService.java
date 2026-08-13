@@ -68,7 +68,19 @@ public class CredentialService extends AuthorizedService {
 
   private static final String LIST_AND_GET_AUTH_EXPRESSION = """
       #authorize(#principal, #metastore, OWNER) ||
-      #authorizeAny(#principal, #credential, OWNER, CREATE_EXTERNAL_LOCATION)
+      #authorize(#principal, #metastore, READ_METADATA) ||
+      #authorizeDirectAny(
+          #principal,
+          #credential,
+          OWNER,
+          ALL_PRIVILEGES,
+          APPLY_TAG,
+          CREATE_EXTERNAL_LOCATION,
+          CREATE_EXTERNAL_TABLE,
+          MANAGE,
+          READ_FILES,
+          READ_METADATA,
+          WRITE_FILES)
       """;
 
   @Get("")
@@ -94,7 +106,7 @@ public class CredentialService extends AuthorizedService {
   @Patch("/{name}")
   @AuthorizeExpression("""
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #credential, OWNER)
+      #authorizeAny(#principal, #credential, OWNER, MANAGE)
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse updateCredential(
@@ -106,7 +118,7 @@ public class CredentialService extends AuthorizedService {
   @Delete("/{name}")
   @AuthorizeExpression("""
       #authorize(#principal, #metastore, OWNER) ||
-      #authorize(#principal, #credential, OWNER)
+      #authorizeAny(#principal, #credential, OWNER, MANAGE)
       """)
   @AuthorizeResourceKey(METASTORE)
   public HttpResponse deleteCredential(
