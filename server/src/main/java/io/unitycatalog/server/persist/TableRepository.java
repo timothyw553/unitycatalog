@@ -26,7 +26,6 @@ import io.unitycatalog.server.persist.dao.SchemaInfoDAO;
 import io.unitycatalog.server.persist.dao.StagingTableDAO;
 import io.unitycatalog.server.persist.dao.TableInfoDAO;
 import io.unitycatalog.server.persist.utils.ExternalLocationUtils;
-import io.unitycatalog.server.persist.utils.FileOperations;
 import io.unitycatalog.server.persist.utils.PagedListingHelper;
 import io.unitycatalog.server.persist.utils.RepositoryUtils;
 import io.unitycatalog.server.persist.utils.TransactionManager;
@@ -1069,49 +1068,32 @@ public class TableRepository {
       return new TableDeletionResult(tableId, schemaId, true);
     }
 
-    purgeTableMetadata(session, tableInfoDAO);
+    TableMetadataPurger.purge(repositories, session, tableInfoDAO);
     return new TableDeletionResult(tableId, schemaId, false);
   }
 
   /**
-   * Permanently removes a table during a forced parent cascade. This retains the pre-lifecycle
-   * synchronous behavior until durable cleanup handoff is introduced.
+   * Permanently removes a table during a forced parent cascade. Managed storage is first captured
+   * in the durable cleanup queue because its table row cannot outlive the schema being removed.
    */
-  TableInfoDAO deleteTable(Session session, UUID schemaId, String tableName) {
+  void deleteTableForParentCascade(Session session, UUID schemaId, String tableName) {
     TableInfoDAO tableInfoDAO = findAnyBySchemaIdAndNameForUpdate(session, schemaId, tableName);
     if (tableInfoDAO == null) {
-      throw new BaseException(ErrorCode.TABLE_NOT_FOUND, "Table not found: " + tableName);
+      // A concurrent expiry handoff may have removed this row after the cascade listed it.
+      return;
     }
     if (TableType.MANAGED.getValue().equals(tableInfoDAO.getType())) {
-      try {
-        FileOperations.deleteDirectory(NormalizedURL.from(tableInfoDAO.getUrl()));
-      } catch (RuntimeException e) {
-        LOGGER.error("Error deleting table directory: {}", tableInfoDAO.getUrl(), e);
-      }
-    }
-    purgeTableMetadata(session, tableInfoDAO);
-    return tableInfoDAO;
-  }
-
-  private void purgeTableMetadata(Session session, TableInfoDAO tableInfoDAO) {
-    if (TableType.MANAGED.getValue().equals(tableInfoDAO.getType())) {
       repositories
-          .getDeltaCommitRepository()
-          .permanentlyDeleteTableCommits(session, tableInfoDAO.getId());
+          .getTableCleanupRepository()
+          .enqueueForImmediateCleanup(session, tableInfoDAO, new Date());
+    } else {
+      TableMetadataPurger.purge(repositories, session, tableInfoDAO);
     }
-    if (RepositoryUtils.isViewLike(tableInfoDAO.getType())) {
-      repositories
-          .getDependencyRepository()
-          .deleteDependencies(session, tableInfoDAO.getId(), DependencyDAO.DependentType.TABLE);
-    }
-    PropertyRepository.findProperties(session, tableInfoDAO.getId(), Constants.TABLE)
-        .forEach(session::remove);
-    session.remove(tableInfoDAO);
   }
 
   /**
-   * Restores a soft-deleted managed table while its metadata still exists. The row lock serializes
-   * restore with other lifecycle mutations.
+   * Restores a soft-deleted managed table while its metadata still exists. Cleanup handoff removes
+   * this row atomically with task creation, so the row lock is the only restore/enqueue boundary.
    */
   public TableInfo restoreTable(String fullName) {
     String[] parts = fullName.split("\\.");

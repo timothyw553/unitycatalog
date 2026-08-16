@@ -303,7 +303,9 @@ public class SchemaRepository {
           deleted.add(
               new DeletedResource(
                   SecurableType.TABLE, tableInfo.getTableId(), schemaId.toString()));
-          repositories.getTableRepository().deleteTable(session, schemaId, tableInfo.getName());
+          repositories
+              .getTableRepository()
+              .deleteTableForParentCascade(session, schemaId, tableInfo.getName());
         }
         nextToken = listTablesResponse.getNextPageToken();
       } while (nextToken != null);

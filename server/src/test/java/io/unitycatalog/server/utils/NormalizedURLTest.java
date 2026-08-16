@@ -142,4 +142,12 @@ public class NormalizedURLTest {
   public void testDoesNotIdentifyScopedOrLocalLocationsAsCloudStorageRoots(String location) {
     assertThat(NormalizedURL.from(location).isCloudStorageRoot()).isFalse();
   }
+
+  @Test
+  public void testIdentifiesLocalAndCloudStorageRoots() {
+    assertThat(NormalizedURL.from("file:///").isStorageRoot()).isTrue();
+    assertThat(NormalizedURL.from("s3://bucket").isStorageRoot()).isTrue();
+    assertThat(NormalizedURL.from("file:///tmp/table").isStorageRoot()).isFalse();
+    assertThat(NormalizedURL.from("s3://bucket/table").isStorageRoot()).isFalse();
+  }
 }

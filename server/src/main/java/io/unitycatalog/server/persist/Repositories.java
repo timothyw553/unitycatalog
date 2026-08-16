@@ -28,6 +28,7 @@ public class Repositories {
   private final ExternalLocationRepository externalLocationRepository;
   private final DeltaCommitRepository deltaCommitRepository;
   private final DependencyRepository dependencyRepository;
+  private final TableCleanupRepository tableCleanupRepository;
 
   private final KeyMapper keyMapper;
 
@@ -49,6 +50,7 @@ public class Repositories {
     this.externalLocationRepository = new ExternalLocationRepository(this, sessionFactory);
     this.deltaCommitRepository = new DeltaCommitRepository(sessionFactory, serverProperties);
     this.dependencyRepository = new DependencyRepository();
+    this.tableCleanupRepository = new TableCleanupRepository(this, sessionFactory);
 
     // KeyMapper uses all the repositories above.
     this.keyMapper = new KeyMapper(this);
