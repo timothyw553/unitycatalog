@@ -17,7 +17,9 @@ import lombok.Setter;
 @Entity
 @Table(
     name = "uc_table_cleanup_tasks",
-    indexes = {@Index(name = "idx_table_cleanup_ready", columnList = "next_attempt_at")})
+    indexes = {
+      @Index(name = "idx_table_cleanup_available", columnList = "next_attempt_at, lease_expires_at")
+    })
 @Getter
 @Setter
 @Builder
@@ -41,6 +43,15 @@ public class TableCleanupTaskDAO {
   @Column(name = "next_attempt_at", nullable = false)
   private Date nextAttemptAt;
 
+  @Column(name = "lease_owner", length = 64)
+  private String leaseOwner;
+
+  @Column(name = "lease_expires_at")
+  private Date leaseExpiresAt;
+
   @Column(name = "attempt_count", nullable = false)
   private int attemptCount;
+
+  @Column(name = "last_failure", length = 255)
+  private String lastFailure;
 }
