@@ -211,6 +211,13 @@ public class ServerProperties {
   private static final DurationValidator DURATION_VALIDATOR = new DurationValidator();
   private static final DurationRangeValidator RETENTION_DURATION_VALIDATOR =
       new DurationRangeValidator(Duration.ZERO, Duration.ofDays(3650));
+  private static final DurationRangeValidator CLEANUP_POLL_INTERVAL_VALIDATOR =
+      new DurationRangeValidator(Duration.ofMillis(1), Duration.ofHours(1));
+  private static final DurationRangeValidator CLEANUP_SLICE_DURATION_VALIDATOR =
+      new DurationRangeValidator(Duration.ofMillis(1), Duration.ofDays(1));
+  private static final IntegerValidator CLEANUP_BATCH_SIZE_VALIDATOR =
+      new IntegerValidator(
+          value -> value >= 1 && value <= 10000, "an integer from 1 through 10000");
 
   @Getter
   public enum Property {
@@ -231,6 +238,12 @@ public class ServerProperties {
         "server.managed-table.use-delta-api-only", "false", BOOLEAN_VALIDATOR),
     MANAGED_TABLE_RETENTION_DURATION(
         "server.managed-table.retention-duration", "PT0S", RETENTION_DURATION_VALIDATOR),
+    MANAGED_TABLE_CLEANUP_POLL_INTERVAL(
+        "server.managed-table.cleanup.poll-interval", "PT5S", CLEANUP_POLL_INTERVAL_VALIDATOR),
+    MANAGED_TABLE_CLEANUP_SLICE_DURATION(
+        "server.managed-table.cleanup.slice-duration", "PT30M", CLEANUP_SLICE_DURATION_VALIDATOR),
+    MANAGED_TABLE_CLEANUP_BATCH_SIZE(
+        "server.managed-table.cleanup.batch-size", "1000", CLEANUP_BATCH_SIZE_VALIDATOR),
     UNIFORM_ICEBERG_V2_ALLOW_MISSING_DV(
         "server.managed-table.uniform-iceberg-v2.allow-missing-dv", "false", BOOLEAN_VALIDATOR),
     // `storage-root.*` are replaced by managed storage locations of catalog and schema.
@@ -526,6 +539,18 @@ public class ServerProperties {
   /** Retention between a managed table's logical drop and cleanup eligibility. */
   public Duration getManagedTableRetentionDuration() {
     return Duration.parse(get(Property.MANAGED_TABLE_RETENTION_DURATION));
+  }
+
+  public Duration getManagedTableCleanupPollInterval() {
+    return Duration.parse(get(Property.MANAGED_TABLE_CLEANUP_POLL_INTERVAL));
+  }
+
+  public Duration getManagedTableCleanupSliceDuration() {
+    return Duration.parse(get(Property.MANAGED_TABLE_CLEANUP_SLICE_DURATION));
+  }
+
+  public int getManagedTableCleanupBatchSize() {
+    return Integer.parseInt(get(Property.MANAGED_TABLE_CLEANUP_BATCH_SIZE));
   }
 
   /**
