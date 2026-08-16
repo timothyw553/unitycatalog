@@ -13,9 +13,12 @@ import io.unitycatalog.server.utils.NormalizedURL;
 import io.unitycatalog.server.utils.ServerProperties;
 import io.unitycatalog.server.utils.UriScheme;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -23,7 +26,10 @@ import org.apache.iceberg.aws.AwsClientProperties;
 import org.apache.iceberg.aws.s3.S3FileIOProperties;
 import org.apache.iceberg.azure.AzureProperties;
 import org.apache.iceberg.gcp.GCPProperties;
+import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.io.DelegateFileIO;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.FileInfo;
 import org.apache.iceberg.io.ResolvingFileIO;
 
 /**
@@ -43,6 +49,84 @@ public class FileOperations {
         serverProperties.getS3Configurations().entrySet().stream()
             .filter(entry -> entry.getValue().getRegion() != null)
             .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().getRegion()));
+  }
+
+  public enum DeleteBatchResult {
+    MORE_WORK,
+    COMPLETE
+  }
+
+  /**
+   * Deletes at most {@code maxFiles} objects below a managed-table location. Cloud credentials are
+   * vended for each invocation, so a lifecycle worker can safely time-slice a large deletion.
+   */
+  public DeleteBatchResult deleteBatch(NormalizedURL path, int maxFiles) {
+    if (maxFiles <= 0) {
+      throw new IllegalArgumentException("maxFiles must be positive");
+    }
+    validateDeletionRoot(path);
+
+    try (FileIO fileIO =
+        getFileIO(
+            path,
+            Set.of(CredentialContext.Privilege.SELECT, CredentialContext.Privilege.UPDATE))) {
+      if (!(fileIO instanceof DelegateFileIO delegateFileIO)) {
+        throw new IllegalStateException("FileIO does not support prefix deletion: " + fileIO);
+      }
+      String directoryPrefix = path + "/";
+      List<String> files = listBatch(delegateFileIO, directoryPrefix, maxFiles);
+      if (!files.isEmpty()) {
+        delegateFileIO.deleteFiles(files);
+        return DeleteBatchResult.MORE_WORK;
+      }
+
+      UriScheme scheme = UriScheme.fromURI(path.toUri());
+      if (scheme == UriScheme.FILE || scheme == UriScheme.NULL) {
+        return SimpleLocalFileIO.deleteEmptyDirectories(path.toString(), maxFiles)
+            ? DeleteBatchResult.COMPLETE
+            : DeleteBatchResult.MORE_WORK;
+      }
+
+      if (scheme == UriScheme.ABFS || scheme == UriScheme.ABFSS) {
+        // ADLS listPrefix intentionally omits directories. Its recursive directory operation is a
+        // single service request that removes the now-empty directory tree and root.
+        delegateFileIO.deletePrefix(path.toString());
+      } else {
+        // Object stores have no real directory. Remove either possible marker without widening the
+        // prefix to sibling keys such as table-10 when deleting table-1.
+        delegateFileIO.deleteFile(directoryPrefix);
+        delegateFileIO.deleteFile(path.toString());
+      }
+      return DeleteBatchResult.COMPLETE;
+    }
+  }
+
+  private static void validateDeletionRoot(NormalizedURL path) {
+    if (path == null || path.isStorageRoot()) {
+      throw new BaseException(ErrorCode.INVALID_ARGUMENT, "Refusing to delete a storage root");
+    }
+  }
+
+  private static List<String> listBatch(DelegateFileIO fileIO, String prefix, int maxFiles) {
+    Iterable<FileInfo> listing = fileIO.listPrefix(prefix);
+    try {
+      List<String> files = new ArrayList<>(maxFiles);
+      for (FileInfo file : listing) {
+        files.add(file.location());
+        if (files.size() == maxFiles) {
+          break;
+        }
+      }
+      return files;
+    } finally {
+      if (listing instanceof CloseableIterable<?> closeable) {
+        try {
+          closeable.close();
+        } catch (IOException e) {
+          throw new UncheckedIOException("Failed to close listing for " + prefix, e);
+        }
+      }
+    }
   }
 
   /** Delete entire directory recursively. Note that currently it does nothing for cloud FS */
@@ -90,6 +174,10 @@ public class FileOperations {
    */
   // TODO: Cache fileIOs
   public FileIO getFileIO(NormalizedURL path) {
+    return getFileIO(path, Set.of(CredentialContext.Privilege.SELECT));
+  }
+
+  FileIO getFileIO(NormalizedURL path, Set<CredentialContext.Privilege> privileges) {
     return switch (UriScheme.fromURI(path.toUri())) {
       // Local paths are served by SimpleLocalFileIO (backed by java.nio + iceberg-core). We
       // deliberately do NOT route these through ResolvingFileIO: it resolves the file:// scheme to
@@ -99,7 +187,7 @@ public class FileOperations {
       case FILE, NULL -> new SimpleLocalFileIO();
       case S3, GS, ABFS, ABFSS -> {
         ResolvingFileIO fileio = new ResolvingFileIO();
-        fileio.initialize(getFileIOConfig(path));
+        fileio.initialize(getFileIOConfig(path, privileges));
         yield fileio;
       }
     };
@@ -113,6 +201,11 @@ public class FileOperations {
    * @param path the normalized storage location to vend credentials and build config for
    */
   public Map<String, String> getFileIOConfig(NormalizedURL path) {
+    return getFileIOConfig(path, Set.of(CredentialContext.Privilege.SELECT));
+  }
+
+  Map<String, String> getFileIOConfig(
+      NormalizedURL path, Set<CredentialContext.Privilege> privileges) {
     UriScheme scheme = UriScheme.fromURI(path.toUri());
     if (scheme == UriScheme.FILE || scheme == UriScheme.NULL) {
       // Local (file://) paths need no cloud credentials, so short-circuit before vending: the
@@ -121,10 +214,7 @@ public class FileOperations {
       return Map.of();
     }
 
-    // FIXME!! privileges are defaulted to READ only here for now as Iceberg REST impl doesn't
-    //  support write
-    TemporaryCredentials cred =
-        storageCredentialVendor.vendCredential(path, Set.of(CredentialContext.Privilege.SELECT));
+    TemporaryCredentials cred = storageCredentialVendor.vendCredential(path, privileges);
     if (cred.getAzureUserDelegationSas() != null) {
       return getADLSConfig(path, cred.getAzureUserDelegationSas());
     } else if (cred.getGcpOauthToken() != null) {
