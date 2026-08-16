@@ -1,18 +1,33 @@
 package io.unitycatalog.server.lifecycle;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.linecorp.armeria.common.HttpMethod;
+import com.linecorp.armeria.common.HttpRequest;
+import com.linecorp.armeria.server.ServiceRequestContext;
+import io.unitycatalog.server.exception.BaseException;
+import io.unitycatalog.server.exception.ErrorCode;
+import io.unitycatalog.server.model.AwsIamRoleRequest;
+import io.unitycatalog.server.model.CreateCredentialRequest;
+import io.unitycatalog.server.model.CreateExternalLocation;
+import io.unitycatalog.server.model.CredentialPurpose;
 import io.unitycatalog.server.model.DataSourceFormat;
 import io.unitycatalog.server.model.TableType;
+import io.unitycatalog.server.model.UpdateExternalLocation;
 import io.unitycatalog.server.persist.Repositories;
 import io.unitycatalog.server.persist.TableCleanupRepository;
 import io.unitycatalog.server.persist.dao.CatalogInfoDAO;
+import io.unitycatalog.server.persist.dao.CredentialDAO;
+import io.unitycatalog.server.persist.dao.ExternalLocationDAO;
 import io.unitycatalog.server.persist.dao.SchemaInfoDAO;
 import io.unitycatalog.server.persist.dao.StagingTableDAO;
 import io.unitycatalog.server.persist.dao.TableCleanupTaskDAO;
 import io.unitycatalog.server.persist.dao.TableInfoDAO;
 import io.unitycatalog.server.persist.utils.HibernateConfigurator;
 import io.unitycatalog.server.persist.utils.TransactionManager;
+import io.unitycatalog.server.utils.NormalizedURL;
 import io.unitycatalog.server.utils.ServerProperties;
 import io.unitycatalog.server.utils.ServerProperties.Property;
 import java.nio.file.Path;
@@ -155,6 +170,93 @@ class TableCleanupRepositoryTest {
     }
   }
 
+  @Test
+  void lifecyclePathIsDeniedForEveryOverlapBeforeAndAfterHandoff() {
+    Date now = new Date();
+    NormalizedURL tablePath = NormalizedURL.from(tablePath("guarded"));
+    UUID tableId = persistTombstone("guarded", tablePath.toString(), now, true);
+    List<NormalizedURL> overlappingPaths =
+        List.of(
+            NormalizedURL.from(temporaryDirectory.toUri()),
+            tablePath,
+            NormalizedURL.from(tablePath + "/part-000.parquet"));
+
+    overlappingPaths.forEach(this::assertPathDenied);
+    assertThat(cleanupRepository.enqueueExpiredTables(now)).isOne();
+    overlappingPaths.forEach(this::assertPathDenied);
+
+    assertThat(
+            cleanupRepository.claimNext("worker", now, Date.from(now.toInstant().plusSeconds(30))))
+        .isPresent();
+    assertThat(cleanupRepository.complete(tableId, "worker", now)).isTrue();
+    overlappingPaths.forEach(
+        path ->
+            assertThatCode(
+                    () -> repositories.getExternalLocationUtils().validatePathNotBeingDeleted(path))
+                .doesNotThrowAnyException());
+  }
+
+  @Test
+  void cleanupCredentialSourceCannotBeRetargetedOrDeleted() {
+    Date now = new Date();
+    String credentialName = "cleanup_credential";
+    String locationName = "cleanup_location";
+    String location = NormalizedURL.from(temporaryDirectory.toUri()).toString();
+    persistCredentialSource(credentialName, locationName, location, now);
+    persistTombstone("protected", tablePath("protected"), now, true);
+
+    assertCleanupSourceProtected(credentialName, locationName, location);
+    assertThat(cleanupRepository.enqueueExpiredTables(now)).isOne();
+    assertCleanupSourceProtected(credentialName, locationName, location);
+  }
+
+  @Test
+  void newExternalLocationCannotOverlapCleanupStorage() {
+    Date now = new Date();
+    persistTombstone("new-location", tablePath("new-location"), now, true);
+    CreateExternalLocation request =
+        new CreateExternalLocation()
+            .name("overlapping_location")
+            .url(temporaryDirectory.toUri().toString())
+            .credentialName("unused");
+
+    assertFailedPrecondition(
+        () -> repositories.getExternalLocationRepository().addExternalLocation(request));
+    assertThat(cleanupRepository.enqueueExpiredTables(now)).isOne();
+    assertFailedPrecondition(
+        () -> repositories.getExternalLocationRepository().addExternalLocation(request));
+  }
+
+  @Test
+  void committedStagingRowIsNeverAStandaloneCredentialTarget() {
+    UUID tableId = UUID.randomUUID();
+    Date now = new Date();
+    TransactionManager.executeWithTransaction(
+        sessionFactory,
+        session -> {
+          session.persist(
+              StagingTableDAO.builder()
+                  .id(tableId)
+                  .schemaId(schemaId)
+                  .name("committed")
+                  .stagingLocation(tablePath("committed"))
+                  .createdAt(now)
+                  .accessedAt(now)
+                  .stageCommitted(true)
+                  .stageCommittedAt(now)
+                  .build());
+          return null;
+        },
+        "Failed to persist committed staging row",
+        /* readOnly = */ false);
+
+    assertTableNotFound(
+        () -> repositories.getTableRepository().getStorageLocationForTableOrStagingTable(tableId));
+    assertTableNotFound(
+        () ->
+            repositories.getTableRepository().getCatalogSchemaIdsByTableOrStagingTableId(tableId));
+  }
+
   private UUID persistTombstone(
       String name, String storageLocation, Date purgeAfter, boolean withStagingRow) {
     UUID tableId = UUID.randomUUID();
@@ -197,5 +299,79 @@ class TableCleanupRepositoryTest {
 
   private String tablePath(String name) {
     return temporaryDirectory.resolve(name).toUri().toString();
+  }
+
+  private void persistCredentialSource(
+      String credentialName, String locationName, String location, Date now) {
+    CredentialDAO credential =
+        CredentialDAO.from(
+            new CreateCredentialRequest()
+                .name(credentialName)
+                .purpose(CredentialPurpose.STORAGE)
+                .awsIamRole(
+                    new AwsIamRoleRequest().roleArn("arn:aws:iam::123456789012:role/cleanup")),
+            "test");
+    TransactionManager.executeWithTransaction(
+        sessionFactory,
+        session -> {
+          session.persist(credential);
+          session.persist(
+              ExternalLocationDAO.builder()
+                  .id(UUID.randomUUID())
+                  .name(locationName)
+                  .url(location)
+                  .credentialId(credential.getId())
+                  .createdAt(now)
+                  .build());
+          return null;
+        },
+        "Failed to persist cleanup credential source",
+        /* readOnly = */ false);
+  }
+
+  private void assertCleanupSourceProtected(
+      String credentialName, String locationName, String location) {
+    assertFailedPrecondition(
+        () ->
+            repositories
+                .getExternalLocationRepository()
+                .updateExternalLocation(locationName, new UpdateExternalLocation().url(location)));
+    assertFailedPrecondition(
+        () ->
+            repositories
+                .getExternalLocationRepository()
+                .deleteExternalLocation(locationName, true));
+    assertFailedPrecondition(
+        () -> repositories.getCredentialRepository().deleteCredential(credentialName, true));
+  }
+
+  private void assertPathDenied(NormalizedURL path) {
+    assertThatThrownBy(
+            () -> repositories.getExternalLocationUtils().validatePathNotBeingDeleted(path))
+        .isInstanceOf(BaseException.class)
+        .extracting(error -> ((BaseException) error).getErrorCode())
+        .isEqualTo(ErrorCode.PERMISSION_DENIED);
+  }
+
+  private static void assertTableNotFound(Runnable action) {
+    assertThatThrownBy(action::run)
+        .isInstanceOf(BaseException.class)
+        .extracting(error -> ((BaseException) error).getErrorCode())
+        .isEqualTo(ErrorCode.TABLE_NOT_FOUND);
+  }
+
+  private static void assertFailedPrecondition(Runnable action) {
+    assertThatThrownBy(() -> runWithRequestContext(action))
+        .isInstanceOf(BaseException.class)
+        .extracting(error -> ((BaseException) error).getErrorCode())
+        .isEqualTo(ErrorCode.FAILED_PRECONDITION);
+  }
+
+  private static void runWithRequestContext(Runnable action) {
+    ServiceRequestContext context =
+        ServiceRequestContext.builder(HttpRequest.of(HttpMethod.GET, "/")).build();
+    try (var ignored = context.push()) {
+      action.run();
+    }
   }
 }
