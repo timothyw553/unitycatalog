@@ -10,6 +10,7 @@ import io.unitycatalog.server.auth.annotation.AuthorizeResourceKey;
 import io.unitycatalog.server.exception.GlobalExceptionHandler;
 import io.unitycatalog.server.model.GenerateTemporaryTableCredential;
 import io.unitycatalog.server.model.TableOperation;
+import io.unitycatalog.server.model.TemporaryCredentials;
 import io.unitycatalog.server.persist.Repositories;
 import io.unitycatalog.server.persist.TableRepository;
 import io.unitycatalog.server.persist.TableRepository.TableStorageLocationInfo;
@@ -31,9 +32,10 @@ public class TemporaryTableCredentialsService {
   private final StorageCredentialVendor storageCredentialVendor;
   private final ServerProperties serverProperties;
 
-  public TemporaryTableCredentialsService(StorageCredentialVendor storageCredentialVendor,
-                                          Repositories repositories,
-                                          ServerProperties serverProperties) {
+  public TemporaryTableCredentialsService(
+      StorageCredentialVendor storageCredentialVendor,
+      Repositories repositories,
+      ServerProperties serverProperties) {
     this.storageCredentialVendor = storageCredentialVendor;
     this.tableRepository = repositories.getTableRepository();
     this.serverProperties = serverProperties;
@@ -45,15 +47,20 @@ public class TemporaryTableCredentialsService {
       @AuthorizeResourceKey(value = TABLE, key = "table_id")
       @AuthorizeKey(key = "operation")
       GenerateTemporaryTableCredential generateTemporaryTableCredential) {
-    String tableId = generateTemporaryTableCredential.getTableId();
+    UUID tableId = UUID.fromString(generateTemporaryTableCredential.getTableId());
     TableStorageLocationInfo info =
-        tableRepository.getStorageLocationForTableOrStagingTable(UUID.fromString(tableId));
+        tableRepository.getStorageLocationForTableOrStagingTable(tableId);
     serverProperties.checkDeltaApiOnlyForManagedTable(
         info.tableType(),
         "GET /delta/v1/catalogs/{catalog}/schemas/{schema}/tables/{table}/credentials"
             + " (or /delta/v1/staging-tables/{table_id}/credentials for unfinalized staging)");
-    return HttpResponse.ofJson(storageCredentialVendor.vendCredential(info.url(),
-            tableOperationToPrivileges(generateTemporaryTableCredential.getOperation())));
+    TemporaryCredentials credentials =
+        storageCredentialVendor.vendCredential(
+            info.url(),
+            tableOperationToPrivileges(generateTemporaryTableCredential.getOperation()));
+    tableRepository.validateManagedCredentialIssuance(
+        tableId, info.url(), credentials.getExpirationTime());
+    return HttpResponse.ofJson(credentials);
   }
 
   private Set<CredentialContext.Privilege> tableOperationToPrivileges(

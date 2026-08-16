@@ -222,7 +222,9 @@ public class UnityCatalogServer implements AutoCloseable {
         .annotateUc(
             "temporary-path-credentials",
             new TemporaryPathCredentialsService(
-                storageCredentialVendor, repositories.getExternalLocationUtils()))
+                storageCredentialVendor,
+                repositories.getExternalLocationUtils(),
+                repositories.getTableRepository()))
         .annotateUc(
             "credentials", new CredentialService(authorizer, repositories, serverProperties))
         .annotateUc(
