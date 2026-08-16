@@ -5,7 +5,6 @@ import io.unitycatalog.server.persist.TableCleanupRepository;
 import io.unitycatalog.server.persist.utils.FileOperations;
 import io.unitycatalog.server.utils.ServerProperties;
 import java.time.Duration;
-import java.util.Date;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -40,7 +39,9 @@ public final class ManagedTableLifecycleManager implements AutoCloseable {
     worker =
         new ManagedTableCleanupWorker(
             cleanupRepository, fileOperations, authorizer, serverProperties);
-    enabled = serverProperties.isManagedTableCleanupEnabled();
+    enabled =
+        serverProperties.isManagedTableLifecycleEnabled()
+            && serverProperties.isManagedTableCleanupEnabled();
     pollInterval = serverProperties.getManagedTableCleanupPollInterval();
     workerCount = serverProperties.getManagedTableCleanupWorkerCount();
   }
@@ -65,7 +66,7 @@ public final class ManagedTableLifecycleManager implements AutoCloseable {
       return;
     }
     try {
-      int enqueued = cleanupRepository.enqueueExpiredTables(new Date());
+      int enqueued = cleanupRepository.enqueueExpiredTables();
       if (enqueued > 0) {
         LOGGER.info("Enqueued {} managed tables for cleanup", enqueued);
       }

@@ -46,6 +46,7 @@ class TableCleanupHandoffTest {
   void setUp() {
     Properties settings = new Properties();
     settings.setProperty(Property.SERVER_ENV.getKey(), "test");
+    settings.setProperty(Property.MANAGED_TABLE_LIFECYCLE_ENABLED.getKey(), "true");
     settings.setProperty(Property.MANAGED_TABLE_RETENTION_DURATION.getKey(), "PT0S");
     ServerProperties serverProperties = new ServerProperties(settings);
 
@@ -89,7 +90,7 @@ class TableCleanupHandoffTest {
     Date now = new Date();
     UUID tableId = persistTombstone("expired", tablePath("expired"), now, true);
 
-    assertThat(cleanupRepository.enqueueExpiredTables(now)).isOne();
+    assertThat(cleanupRepository.enqueueExpiredTables()).isOne();
 
     try (Session session = sessionFactory.openSession()) {
       assertThat(session.get(TableInfoDAO.class, tableId)).isNull();
@@ -109,7 +110,7 @@ class TableCleanupHandoffTest {
     UUID malformedId = persistTombstone("malformed", " ", now, false);
     UUID healthyId = persistTombstone("healthy", tablePath("healthy"), now, true);
 
-    assertThat(cleanupRepository.enqueueExpiredTables(now)).isOne();
+    assertThat(cleanupRepository.enqueueExpiredTables()).isOne();
 
     try (Session session = sessionFactory.openSession()) {
       assertThat(session.get(TableInfoDAO.class, malformedId)).isNotNull();
@@ -127,7 +128,7 @@ class TableCleanupHandoffTest {
         persistTombstone(
             "retained", tablePath("retained"), Date.from(now.toInstant().plusSeconds(60)), true);
 
-    assertThat(cleanupRepository.enqueueExpiredTables(now)).isZero();
+    assertThat(cleanupRepository.enqueueExpiredTables()).isZero();
     try (Session session = sessionFactory.openSession()) {
       assertThat(session.get(TableInfoDAO.class, tableId)).isNotNull();
       assertThat(session.get(TableCleanupTaskDAO.class, tableId)).isNull();
@@ -145,6 +146,22 @@ class TableCleanupHandoffTest {
       assertThat(session.get(TableInfoDAO.class, tableId)).isNull();
       assertThat(session.get(TableCleanupTaskDAO.class, tableId)).isNotNull();
       assertThat(session.get(SchemaInfoDAO.class, schemaId)).isNull();
+    }
+  }
+
+  @Test
+  void disabledLifecycleStillHandsOffAnExistingTombstone() {
+    UUID tableId = persistTombstone("rollback", tablePath("rollback"), new Date(), true);
+    Properties settings = new Properties();
+    settings.setProperty(Property.SERVER_ENV.getKey(), "test");
+    Repositories disabledRepositories =
+        new Repositories(sessionFactory, new ServerProperties(settings));
+
+    disabledRepositories.getSchemaRepository().deleteSchema(CATALOG + "." + SCHEMA, true);
+
+    try (Session session = sessionFactory.openSession()) {
+      assertThat(session.get(TableInfoDAO.class, tableId)).isNull();
+      assertThat(session.get(TableCleanupTaskDAO.class, tableId)).isNotNull();
     }
   }
 

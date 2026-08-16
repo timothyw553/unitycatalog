@@ -13,14 +13,29 @@ final class TableMetadataPurger {
   private TableMetadataPurger() {}
 
   static void purge(Repositories repositories, Session session, TableInfoDAO table) {
+    purge(repositories, session, table, /* removeCommittedStaging = */ true);
+  }
+
+  /** Preserves the pre-lifecycle DROP behavior while the lifecycle gate is disabled. */
+  static void purgeLegacy(Repositories repositories, Session session, TableInfoDAO table) {
+    purge(repositories, session, table, /* removeCommittedStaging = */ false);
+  }
+
+  private static void purge(
+      Repositories repositories,
+      Session session,
+      TableInfoDAO table,
+      boolean removeCommittedStaging) {
     if (TableType.MANAGED.getValue().equals(table.getType())) {
       repositories.getDeltaCommitRepository().permanentlyDeleteTableCommits(session, table.getId());
 
       // Finalized staging rows share the table UUID. They must not become a credential fallback
       // after the table row is gone.
-      StagingTableDAO stagingTable = session.get(StagingTableDAO.class, table.getId());
-      if (stagingTable != null) {
-        session.remove(stagingTable);
+      if (removeCommittedStaging) {
+        StagingTableDAO stagingTable = session.get(StagingTableDAO.class, table.getId());
+        if (stagingTable != null) {
+          session.remove(stagingTable);
+        }
       }
     }
     if (RepositoryUtils.isViewLike(table.getType())) {

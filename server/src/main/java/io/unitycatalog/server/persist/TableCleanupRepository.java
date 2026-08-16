@@ -5,9 +5,11 @@ import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.model.TableType;
 import io.unitycatalog.server.persist.dao.TableCleanupTaskDAO;
 import io.unitycatalog.server.persist.dao.TableInfoDAO;
+import io.unitycatalog.server.persist.utils.DatabaseTime;
 import io.unitycatalog.server.persist.utils.TransactionManager;
 import io.unitycatalog.server.utils.NormalizedURL;
 import jakarta.persistence.LockModeType;
+import java.time.Duration;
 import java.util.Date;
 import java.util.List;
 import java.util.Optional;
@@ -40,11 +42,11 @@ public class TableCleanupRepository {
    * Hands eligible tombstones to durable cleanup. Each table uses its own transaction so one
    * corrupt row cannot roll back or starve the rest of the batch.
    */
-  public int enqueueExpiredTables(Date now) {
+  public int enqueueExpiredTables() {
     int enqueued = 0;
-    for (UUID tableId : findExpiredTableIds(now)) {
+    for (UUID tableId : findExpiredTableIds()) {
       try {
-        if (enqueueExpiredTable(tableId, now)) {
+        if (enqueueExpiredTable(tableId)) {
           enqueued++;
         }
       } catch (RuntimeException e) {
@@ -57,7 +59,7 @@ public class TableCleanupRepository {
     return enqueued;
   }
 
-  private List<UUID> findExpiredTableIds(Date now) {
+  private List<UUID> findExpiredTableIds() {
     return TransactionManager.executeWithTransaction(
         sessionFactory,
         session -> {
@@ -66,11 +68,10 @@ public class TableCleanupRepository {
                   "SELECT t.id FROM TableInfoDAO t"
                       + " WHERE t.type = :managedType"
                       + " AND t.deletedAt IS NOT NULL"
-                      + " AND t.purgeAfter <= :now"
+                      + " AND t.purgeAfter <= CURRENT_TIMESTAMP"
                       + " ORDER BY t.purgeAfter, t.id",
                   UUID.class);
           query.setParameter("managedType", TableType.MANAGED.getValue());
-          query.setParameter("now", now);
           query.setMaxResults(ENQUEUE_BATCH_SIZE);
           return query.getResultList();
         },
@@ -78,7 +79,7 @@ public class TableCleanupRepository {
         /* readOnly = */ true);
   }
 
-  private boolean enqueueExpiredTable(UUID tableId, Date now) {
+  private boolean enqueueExpiredTable(UUID tableId) {
     return TransactionManager.executeWithTransaction(
         sessionFactory,
         session -> {
@@ -87,13 +88,14 @@ public class TableCleanupRepository {
           if (table == null) {
             return false;
           }
+          Date now = DatabaseTime.now(session);
           if (!TableType.MANAGED.getValue().equals(table.getType())
               || table.getDeletedAt() == null
               || table.getPurgeAfter() == null
               || table.getPurgeAfter().after(now)) {
             return false;
           }
-          persistTask(session, table, now);
+          persistTask(session, table, now, now);
           TableMetadataPurger.purge(repositories, session, table);
           return true;
         },
@@ -102,14 +104,16 @@ public class TableCleanupRepository {
   }
 
   /** Atomically captures managed storage before a parent cascade removes table metadata. */
-  void enqueueForImmediateCleanup(Session session, TableInfoDAO table, Date now) {
+  void enqueueForCleanup(Session session, TableInfoDAO table, Duration delay) {
     if (session.get(TableCleanupTaskDAO.class, table.getId()) == null) {
-      persistTask(session, table, now);
+      Date now = DatabaseTime.now(session);
+      persistTask(session, table, now, Date.from(now.toInstant().plus(delay)));
     }
     TableMetadataPurger.purge(repositories, session, table);
   }
 
-  private static void persistTask(Session session, TableInfoDAO table, Date now) {
+  private static void persistTask(
+      Session session, TableInfoDAO table, Date createdAt, Date nextAttemptAt) {
     // Normalize before metadata is removed so malformed locations fail the handoff transaction.
     NormalizedURL storageLocation = NormalizedURL.from(table.getUrl());
     if (storageLocation.isStorageRoot()) {
@@ -121,17 +125,19 @@ public class TableCleanupRepository {
             .tableId(table.getId())
             .schemaId(table.getSchemaId())
             .storageLocation(storageLocation.toString())
-            .createdAt(now)
-            .nextAttemptAt(now)
+            .createdAt(createdAt)
+            .nextAttemptAt(nextAttemptAt)
             .attemptCount(0)
             .build());
   }
 
   /** Claims one available task with an expiring database lease. */
-  public Optional<CleanupTask> claimNext(String workerId, Date now, Date leaseExpiresAt) {
+  public Optional<CleanupTask> claimNext(String workerId, Duration leaseDuration) {
     return TransactionManager.executeWithTransaction(
         sessionFactory,
         session -> {
+          Date now = DatabaseTime.now(session);
+          Date leaseExpiresAt = Date.from(now.toInstant().plus(leaseDuration));
           Query<UUID> candidates =
               session.createQuery(
                   "SELECT t.tableId FROM TableCleanupTaskDAO t"
@@ -172,41 +178,44 @@ public class TableCleanupRepository {
   }
 
   /** Extends a claim before another bounded delete request. */
-  public boolean renewLease(UUID tableId, String workerId, Date now, Date leaseExpiresAt) {
+  public boolean renewLease(UUID tableId, String workerId, Duration leaseDuration) {
     return TransactionManager.executeWithTransaction(
         sessionFactory,
-        session ->
-            session
-                    .createMutationQuery(
-                        "UPDATE TableCleanupTaskDAO t SET t.leaseExpiresAt = :leaseExpiresAt"
-                            + " WHERE t.tableId = :tableId AND t.leaseOwner = :workerId"
-                            + " AND t.leaseExpiresAt > :now")
-                    .setParameter("leaseExpiresAt", leaseExpiresAt)
-                    .setParameter("tableId", tableId)
-                    .setParameter("workerId", workerId)
-                    .setParameter("now", now)
-                    .executeUpdate()
-                == 1,
+        session -> {
+          Date now = DatabaseTime.now(session);
+          Date leaseExpiresAt = Date.from(now.toInstant().plus(leaseDuration));
+          return session
+                  .createMutationQuery(
+                      "UPDATE TableCleanupTaskDAO t SET t.leaseExpiresAt = :leaseExpiresAt"
+                          + " WHERE t.tableId = :tableId AND t.leaseOwner = :workerId"
+                          + " AND t.leaseExpiresAt > :now")
+                  .setParameter("leaseExpiresAt", leaseExpiresAt)
+                  .setParameter("tableId", tableId)
+                  .setParameter("workerId", workerId)
+                  .setParameter("now", now)
+                  .executeUpdate()
+              == 1;
+        },
         "Failed to renew managed table cleanup lease " + tableId,
         /* readOnly = */ false);
   }
 
   /** Releases an incomplete task so another table gets the next worker slice. */
-  public boolean reschedule(UUID tableId, String workerId, Date now, Date nextAttemptAt) {
-    return releaseClaim(tableId, workerId, now, nextAttemptAt, null);
+  public boolean reschedule(UUID tableId, String workerId, Duration delay) {
+    return releaseClaim(tableId, workerId, delay, null);
   }
 
   /** Records a failed attempt without persisting a potentially credential-bearing error message. */
-  public boolean recordFailure(
-      UUID tableId, String workerId, Date now, Date nextAttemptAt, Throwable failure) {
-    return releaseClaim(tableId, workerId, now, nextAttemptAt, failure.getClass().getSimpleName());
+  public boolean recordFailure(UUID tableId, String workerId, Duration delay, Throwable failure) {
+    return releaseClaim(tableId, workerId, delay, failure.getClass().getSimpleName());
   }
 
-  private boolean releaseClaim(
-      UUID tableId, String workerId, Date now, Date nextAttemptAt, String failureClass) {
+  private boolean releaseClaim(UUID tableId, String workerId, Duration delay, String failureClass) {
     return TransactionManager.executeWithTransaction(
         sessionFactory,
         session -> {
+          Date now = DatabaseTime.now(session);
+          Date nextAttemptAt = Date.from(now.toInstant().plus(delay));
           String failureUpdate =
               failureClass == null
                   ? ""
@@ -233,7 +242,7 @@ public class TableCleanupRepository {
   }
 
   /** Removes a completed task only while the caller still owns its lease. */
-  public boolean complete(UUID tableId, String workerId, Date now) {
+  public boolean complete(UUID tableId, String workerId) {
     return TransactionManager.executeWithTransaction(
         sessionFactory,
         session -> {
@@ -242,6 +251,7 @@ public class TableCleanupRepository {
           if (task == null) {
             return false;
           }
+          Date now = DatabaseTime.now(session);
           if (!workerId.equals(task.getLeaseOwner())
               || task.getLeaseExpiresAt() == null
               || !task.getLeaseExpiresAt().after(now)) {
