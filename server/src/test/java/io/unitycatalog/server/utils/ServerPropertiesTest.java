@@ -210,9 +210,15 @@ public class ServerPropertiesTest {
   public void testManagedTableLifecycleValidators() {
     testValidProperty(Property.MANAGED_TABLE_RETENTION_DURATION, "PT0S");
     testValidProperty(Property.MANAGED_TABLE_RETENTION_DURATION, "PT24H");
+    testValidProperty(Property.MANAGED_TABLE_CLEANUP_POLL_INTERVAL, "PT0.1S");
+    testValidProperty(Property.MANAGED_TABLE_CLEANUP_SLICE_DURATION, "PT30M");
 
     testInvalidProperty(
         Property.MANAGED_TABLE_RETENTION_DURATION, "-PT1S", "Expected a duration between");
+    testInvalidProperty(
+        Property.MANAGED_TABLE_CLEANUP_POLL_INTERVAL, "PT0S", "Expected a duration between");
+    testInvalidProperty(
+        Property.MANAGED_TABLE_CLEANUP_BATCH_SIZE, "10001", "an integer from 1 through 10000");
   }
 
   @Test
