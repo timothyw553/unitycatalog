@@ -21,6 +21,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.experimental.SuperBuilder;
+import org.hibernate.annotations.Check;
 
 // Hibernate annotations
 @Entity
@@ -30,6 +31,10 @@ import lombok.experimental.SuperBuilder;
       @Index(name = "idx_name", columnList = "name"),
       @Index(name = "idx_table_cleanup_eligibility", columnList = "type, purge_after"),
     })
+@Check(
+    constraints =
+        "(deleted_at IS NULL AND purge_after IS NULL)"
+            + " OR (deleted_at IS NOT NULL AND purge_after IS NOT NULL)")
 // Lombok annotations
 @Getter
 @Setter

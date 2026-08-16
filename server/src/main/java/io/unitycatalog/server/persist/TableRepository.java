@@ -25,7 +25,9 @@ import io.unitycatalog.server.persist.dao.PropertyDAO;
 import io.unitycatalog.server.persist.dao.SchemaInfoDAO;
 import io.unitycatalog.server.persist.dao.StagingTableDAO;
 import io.unitycatalog.server.persist.dao.TableInfoDAO;
+import io.unitycatalog.server.persist.utils.DatabaseTime;
 import io.unitycatalog.server.persist.utils.ExternalLocationUtils;
+import io.unitycatalog.server.persist.utils.FileOperations;
 import io.unitycatalog.server.persist.utils.PagedListingHelper;
 import io.unitycatalog.server.persist.utils.RepositoryUtils;
 import io.unitycatalog.server.persist.utils.TransactionManager;
@@ -38,6 +40,7 @@ import io.unitycatalog.server.utils.Constants;
 import io.unitycatalog.server.utils.IdentityUtils;
 import io.unitycatalog.server.utils.NormalizedURL;
 import io.unitycatalog.server.utils.ServerProperties;
+import io.unitycatalog.server.utils.UriScheme;
 import io.unitycatalog.server.utils.ValidationUtils;
 import jakarta.persistence.LockModeType;
 import java.time.Duration;
@@ -63,7 +66,9 @@ public class TableRepository {
   private final SessionFactory sessionFactory;
   private final Repositories repositories;
   private final ServerProperties serverProperties;
+  private final boolean managedTableLifecycleEnabled;
   private final Duration managedTableRetention;
+  private final Duration managedTableCredentialDrain;
   private static final PagedListingHelper<TableInfoDAO> LISTING_HELPER =
       new PagedListingHelper<>(TableInfoDAO.class);
 
@@ -72,7 +77,10 @@ public class TableRepository {
     this.repositories = repositories;
     this.sessionFactory = sessionFactory;
     this.serverProperties = serverProperties;
+    this.managedTableLifecycleEnabled = serverProperties.isManagedTableLifecycleEnabled();
     this.managedTableRetention = serverProperties.getManagedTableRetentionDuration();
+    this.managedTableCredentialDrain =
+        serverProperties.getManagedTableCredentialDrainDuration();
   }
 
   /**
@@ -1062,9 +1070,15 @@ public class TableRepository {
     }
     UUID tableId = tableInfoDAO.getId();
     if (TableType.MANAGED.getValue().equals(tableInfoDAO.getType())) {
-      Date deletedAt = new Date();
+      if (!managedTableLifecycleEnabled) {
+        deleteManagedStorageLegacy(tableInfoDAO);
+        TableMetadataPurger.purgeLegacy(repositories, session, tableInfoDAO);
+        return new TableDeletionResult(tableId, schemaId, false);
+      }
+      Date deletedAt = DatabaseTime.now(session);
       tableInfoDAO.setDeletedAt(deletedAt);
-      tableInfoDAO.setPurgeAfter(Date.from(deletedAt.toInstant().plus(managedTableRetention)));
+      tableInfoDAO.setPurgeAfter(
+          Date.from(deletedAt.toInstant().plus(cleanupDelay(tableInfoDAO))));
       return new TableDeletionResult(tableId, schemaId, true);
     }
 
@@ -1082,12 +1096,41 @@ public class TableRepository {
       // A concurrent expiry handoff may have removed this row after the cascade listed it.
       return;
     }
-    if (TableType.MANAGED.getValue().equals(tableInfoDAO.getType())) {
+    boolean requiresDurableCleanup =
+        TableType.MANAGED.getValue().equals(tableInfoDAO.getType())
+            && (managedTableLifecycleEnabled || tableInfoDAO.getDeletedAt() != null);
+    if (requiresDurableCleanup) {
       repositories
           .getTableCleanupRepository()
-          .enqueueForImmediateCleanup(session, tableInfoDAO, new Date());
+          .enqueueForCleanup(session, tableInfoDAO, credentialDrainDelay(tableInfoDAO));
     } else {
-      TableMetadataPurger.purge(repositories, session, tableInfoDAO);
+      if (TableType.MANAGED.getValue().equals(tableInfoDAO.getType())) {
+        deleteManagedStorageLegacy(tableInfoDAO);
+      }
+      TableMetadataPurger.purgeLegacy(repositories, session, tableInfoDAO);
+    }
+  }
+
+  private Duration cleanupDelay(TableInfoDAO table) {
+    Duration credentialDrain = credentialDrainDelay(table);
+    return managedTableRetention.compareTo(credentialDrain) >= 0
+        ? managedTableRetention
+        : credentialDrain;
+  }
+
+  private Duration credentialDrainDelay(TableInfoDAO table) {
+    UriScheme scheme = UriScheme.fromURI(NormalizedURL.from(table.getUrl()).toUri());
+    return switch (scheme) {
+      case FILE, NULL -> Duration.ZERO;
+      case S3, GS, ABFS, ABFSS -> managedTableCredentialDrain;
+    };
+  }
+
+  private static void deleteManagedStorageLegacy(TableInfoDAO table) {
+    try {
+      FileOperations.deleteDirectory(NormalizedURL.from(table.getUrl()));
+    } catch (RuntimeException e) {
+      LOGGER.error("Error deleting table directory: {}", table.getUrl(), e);
     }
   }
 

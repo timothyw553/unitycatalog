@@ -47,6 +47,7 @@ class ManagedTableSoftDeleteTest {
   void setUp() {
     Properties settings = new Properties();
     settings.setProperty(Property.SERVER_ENV.getKey(), "test");
+    settings.setProperty(Property.MANAGED_TABLE_LIFECYCLE_ENABLED.getKey(), "true");
     settings.setProperty(Property.MANAGED_TABLE_RETENTION_DURATION.getKey(), "PT0S");
     ServerProperties serverProperties = new ServerProperties(settings);
 
@@ -113,6 +114,7 @@ class ManagedTableSoftDeleteTest {
     UUID tableId = persistManagedTable();
     Properties settings = new Properties();
     settings.setProperty(Property.SERVER_ENV.getKey(), "test");
+    settings.setProperty(Property.MANAGED_TABLE_LIFECYCLE_ENABLED.getKey(), "true");
     settings.setProperty(Property.MANAGED_TABLE_RETENTION_DURATION.getKey(), "PT1H");
     TableRepository retainedTableRepository =
         new TableRepository(repositories, sessionFactory, new ServerProperties(settings));

@@ -12,6 +12,7 @@ import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.Check;
 
 /** Durable work item for deleting one managed table's storage. */
 @Entity
@@ -20,6 +21,10 @@ import lombok.Setter;
     indexes = {
       @Index(name = "idx_table_cleanup_available", columnList = "next_attempt_at, lease_expires_at")
     })
+@Check(
+    constraints =
+        "(lease_owner IS NULL AND lease_expires_at IS NULL)"
+            + " OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)")
 @Getter
 @Setter
 @Builder

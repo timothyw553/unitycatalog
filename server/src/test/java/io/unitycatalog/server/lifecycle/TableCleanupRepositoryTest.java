@@ -25,12 +25,14 @@ import io.unitycatalog.server.persist.dao.SchemaInfoDAO;
 import io.unitycatalog.server.persist.dao.StagingTableDAO;
 import io.unitycatalog.server.persist.dao.TableCleanupTaskDAO;
 import io.unitycatalog.server.persist.dao.TableInfoDAO;
+import io.unitycatalog.server.persist.utils.DatabaseTime;
 import io.unitycatalog.server.persist.utils.HibernateConfigurator;
 import io.unitycatalog.server.persist.utils.TransactionManager;
 import io.unitycatalog.server.utils.NormalizedURL;
 import io.unitycatalog.server.utils.ServerProperties;
 import io.unitycatalog.server.utils.ServerProperties.Property;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Date;
 import java.util.List;
@@ -59,6 +61,7 @@ class TableCleanupRepositoryTest {
   void setUp() {
     Properties settings = new Properties();
     settings.setProperty(Property.SERVER_ENV.getKey(), "test");
+    settings.setProperty(Property.MANAGED_TABLE_LIFECYCLE_ENABLED.getKey(), "true");
     settings.setProperty(Property.MANAGED_TABLE_RETENTION_DURATION.getKey(), "PT0S");
     ServerProperties serverProperties = new ServerProperties(settings);
 
@@ -102,28 +105,22 @@ class TableCleanupRepositoryTest {
   void staleOwnerCannotMutateAReclaimedTask() {
     Date now = new Date();
     UUID tableId = persistTombstone("reclaimed", tablePath("reclaimed"), now, true);
-    assertThat(cleanupRepository.enqueueExpiredTables(now)).isOne();
+    assertThat(cleanupRepository.enqueueExpiredTables()).isOne();
 
-    assertThat(cleanupRepository.claimNext("first", now, Date.from(now.toInstant().minusMillis(1))))
-        .isPresent();
-    assertThat(
-            cleanupRepository.renewLease(
-                tableId, "first", now, Date.from(now.toInstant().plusSeconds(30))))
-        .isFalse();
-    assertThat(
-            cleanupRepository.claimNext("second", now, Date.from(now.toInstant().plusSeconds(30))))
-        .isPresent();
+    assertThat(cleanupRepository.claimNext("first", Duration.ofSeconds(30))).isPresent();
+    expireLease(tableId);
+    assertThat(cleanupRepository.renewLease(tableId, "first", Duration.ofSeconds(30))).isFalse();
+    assertThat(cleanupRepository.claimNext("second", Duration.ofSeconds(30))).isPresent();
 
-    assertThat(cleanupRepository.reschedule(tableId, "first", now, now)).isFalse();
+    assertThat(cleanupRepository.reschedule(tableId, "first", Duration.ZERO)).isFalse();
     assertThat(
             cleanupRepository.recordFailure(
                 tableId,
                 "first",
-                now,
-                now,
+                Duration.ZERO,
                 new IllegalStateException("https://example.invalid/?secret=do-not-store")))
         .isFalse();
-    assertThat(cleanupRepository.complete(tableId, "first", now)).isFalse();
+    assertThat(cleanupRepository.complete(tableId, "first")).isFalse();
 
     try (Session session = sessionFactory.openSession()) {
       TableCleanupTaskDAO task = session.get(TableCleanupTaskDAO.class, tableId);
@@ -136,8 +133,7 @@ class TableCleanupRepositoryTest {
             cleanupRepository.recordFailure(
                 tableId,
                 "second",
-                now,
-                now,
+                Duration.ZERO,
                 new IllegalStateException("https://example.invalid/?secret=do-not-store")))
         .isTrue();
     try (Session session = sessionFactory.openSession()) {
@@ -151,17 +147,16 @@ class TableCleanupRepositoryTest {
   void expiredOwnerCannotMutateAnUnclaimedTask() {
     Date now = new Date();
     UUID tableId = persistTombstone("expired-lease", tablePath("expired-lease"), now, true);
-    assertThat(cleanupRepository.enqueueExpiredTables(now)).isOne();
-    assertThat(
-            cleanupRepository.claimNext("expired", now, Date.from(now.toInstant().minusMillis(1))))
-        .isPresent();
+    assertThat(cleanupRepository.enqueueExpiredTables()).isOne();
+    assertThat(cleanupRepository.claimNext("expired", Duration.ofSeconds(30))).isPresent();
+    expireLease(tableId);
 
-    assertThat(cleanupRepository.reschedule(tableId, "expired", now, now)).isFalse();
+    assertThat(cleanupRepository.reschedule(tableId, "expired", Duration.ZERO)).isFalse();
     assertThat(
             cleanupRepository.recordFailure(
-                tableId, "expired", now, now, new IllegalStateException("failure")))
+                tableId, "expired", Duration.ZERO, new IllegalStateException("failure")))
         .isFalse();
-    assertThat(cleanupRepository.complete(tableId, "expired", now)).isFalse();
+    assertThat(cleanupRepository.complete(tableId, "expired")).isFalse();
 
     try (Session session = sessionFactory.openSession()) {
       TableCleanupTaskDAO task = session.get(TableCleanupTaskDAO.class, tableId);
@@ -182,13 +177,11 @@ class TableCleanupRepositoryTest {
             NormalizedURL.from(tablePath + "/part-000.parquet"));
 
     overlappingPaths.forEach(this::assertPathDenied);
-    assertThat(cleanupRepository.enqueueExpiredTables(now)).isOne();
+    assertThat(cleanupRepository.enqueueExpiredTables()).isOne();
     overlappingPaths.forEach(this::assertPathDenied);
 
-    assertThat(
-            cleanupRepository.claimNext("worker", now, Date.from(now.toInstant().plusSeconds(30))))
-        .isPresent();
-    assertThat(cleanupRepository.complete(tableId, "worker", now)).isTrue();
+    assertThat(cleanupRepository.claimNext("worker", Duration.ofSeconds(30))).isPresent();
+    assertThat(cleanupRepository.complete(tableId, "worker")).isTrue();
     overlappingPaths.forEach(
         path ->
             assertThatCode(
@@ -206,7 +199,7 @@ class TableCleanupRepositoryTest {
     persistTombstone("protected", tablePath("protected"), now, true);
 
     assertCleanupSourceProtected(credentialName, locationName, location);
-    assertThat(cleanupRepository.enqueueExpiredTables(now)).isOne();
+    assertThat(cleanupRepository.enqueueExpiredTables()).isOne();
     assertCleanupSourceProtected(credentialName, locationName, location);
   }
 
@@ -222,7 +215,7 @@ class TableCleanupRepositoryTest {
 
     assertFailedPrecondition(
         () -> repositories.getExternalLocationRepository().addExternalLocation(request));
-    assertThat(cleanupRepository.enqueueExpiredTables(now)).isOne();
+    assertThat(cleanupRepository.enqueueExpiredTables()).isOne();
     assertFailedPrecondition(
         () -> repositories.getExternalLocationRepository().addExternalLocation(request));
   }
@@ -255,6 +248,18 @@ class TableCleanupRepositoryTest {
     assertTableNotFound(
         () ->
             repositories.getTableRepository().getCatalogSchemaIdsByTableOrStagingTableId(tableId));
+  }
+
+  private void expireLease(UUID tableId) {
+    TransactionManager.executeWithTransaction(
+        sessionFactory,
+        session -> {
+          TableCleanupTaskDAO task = session.get(TableCleanupTaskDAO.class, tableId);
+          task.setLeaseExpiresAt(Date.from(DatabaseTime.now(session).toInstant().minusSeconds(1)));
+          return null;
+        },
+        "Failed to expire test lease",
+        /* readOnly = */ false);
   }
 
   private UUID persistTombstone(

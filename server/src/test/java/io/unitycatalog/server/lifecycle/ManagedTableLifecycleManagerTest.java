@@ -41,6 +41,7 @@ class ManagedTableLifecycleManagerTest {
   void setUp() {
     Properties settings = new Properties();
     settings.setProperty(Property.SERVER_ENV.getKey(), "test");
+    settings.setProperty(Property.MANAGED_TABLE_LIFECYCLE_ENABLED.getKey(), "true");
     settings.setProperty(Property.MANAGED_TABLE_RETENTION_DURATION.getKey(), "PT0S");
     settings.setProperty(Property.MANAGED_TABLE_CLEANUP_ENABLED.getKey(), "true");
     settings.setProperty(Property.MANAGED_TABLE_CLEANUP_POLL_INTERVAL.getKey(), "PT0.02S");
@@ -92,6 +93,7 @@ class ManagedTableLifecycleManagerTest {
 
     Properties settings = new Properties();
     settings.setProperty(Property.SERVER_ENV.getKey(), "test");
+    settings.setProperty(Property.MANAGED_TABLE_LIFECYCLE_ENABLED.getKey(), "true");
     settings.setProperty(Property.MANAGED_TABLE_CLEANUP_ENABLED.getKey(), "true");
     settings.setProperty(Property.MANAGED_TABLE_CLEANUP_POLL_INTERVAL.getKey(), "PT5S");
     settings.setProperty(Property.MANAGED_TABLE_CLEANUP_WORKER_COUNT.getKey(), "1");

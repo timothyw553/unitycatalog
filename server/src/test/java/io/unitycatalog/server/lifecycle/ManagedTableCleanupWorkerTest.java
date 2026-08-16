@@ -50,6 +50,7 @@ class ManagedTableCleanupWorkerTest {
   void setUp() {
     Properties settings = new Properties();
     settings.setProperty(Property.SERVER_ENV.getKey(), "test");
+    settings.setProperty(Property.MANAGED_TABLE_LIFECYCLE_ENABLED.getKey(), "true");
     settings.setProperty(Property.MANAGED_TABLE_RETENTION_DURATION.getKey(), "PT0S");
     settings.setProperty(Property.MANAGED_TABLE_CLEANUP_POLL_INTERVAL.getKey(), "PT0.02S");
     settings.setProperty(Property.MANAGED_TABLE_CLEANUP_SLICE_DURATION.getKey(), "PT2S");
@@ -99,7 +100,7 @@ class ManagedTableCleanupWorkerTest {
     Files.writeString(tableDirectory.resolve("partition/part-2.parquet"), "two");
     UUID tableId = persistManagedTable(tableDirectory);
     repositories.getTableRepository().deleteTable(CATALOG, SCHEMA, TABLE);
-    assertThat(repositories.getTableCleanupRepository().enqueueExpiredTables(new Date())).isOne();
+    assertThat(repositories.getTableCleanupRepository().enqueueExpiredTables()).isOne();
 
     RecordingAuthorizer authorizer = new RecordingAuthorizer();
     ManagedTableCleanupWorker worker =
@@ -125,7 +126,7 @@ class ManagedTableCleanupWorkerTest {
     Files.createDirectories(tableDirectory);
     UUID tableId = persistManagedTable(tableDirectory);
     repositories.getTableRepository().deleteTable(CATALOG, SCHEMA, TABLE);
-    assertThat(repositories.getTableCleanupRepository().enqueueExpiredTables(new Date())).isOne();
+    assertThat(repositories.getTableCleanupRepository().enqueueExpiredTables()).isOne();
 
     AtomicBoolean active = new AtomicBoolean(true);
     FileOperations stoppingFileOperations =
@@ -144,11 +145,10 @@ class ManagedTableCleanupWorkerTest {
             serverProperties);
 
     assertThat(worker.processNext("stopping", active::get)).isTrue();
-    Date now = new Date();
     Optional<TableCleanupRepository.CleanupTask> replacement =
         repositories
             .getTableCleanupRepository()
-            .claimNext("replacement", now, Date.from(now.toInstant().plusSeconds(30)));
+            .claimNext("replacement", java.time.Duration.ofSeconds(30));
     assertThat(replacement).isPresent();
     assertThat(replacement.orElseThrow().tableId()).isEqualTo(tableId);
   }

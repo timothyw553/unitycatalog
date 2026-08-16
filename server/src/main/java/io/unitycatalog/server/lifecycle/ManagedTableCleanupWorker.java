@@ -8,7 +8,6 @@ import io.unitycatalog.server.persist.utils.FileOperations.DeleteBatchResult;
 import io.unitycatalog.server.utils.NormalizedURL;
 import io.unitycatalog.server.utils.ServerProperties;
 import java.time.Duration;
-import java.util.Date;
 import java.util.Optional;
 import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
@@ -17,7 +16,6 @@ import org.slf4j.LoggerFactory;
 /** Processes one leased cleanup task at a time, independently of thread scheduling. */
 final class ManagedTableCleanupWorker {
   private static final Logger LOGGER = LoggerFactory.getLogger(ManagedTableCleanupWorker.class);
-  private static final Duration LEASE_DURATION = Duration.ofMinutes(5);
   private static final Duration MAX_RETRY_DELAY = Duration.ofMinutes(5);
 
   private final TableCleanupRepository cleanupRepository;
@@ -25,6 +23,7 @@ final class ManagedTableCleanupWorker {
   private final UnityCatalogAuthorizer authorizer;
   private final Duration pollInterval;
   private final Duration sliceDuration;
+  private final Duration leaseDuration;
   private final int deleteBatchSize;
 
   ManagedTableCleanupWorker(
@@ -37,6 +36,7 @@ final class ManagedTableCleanupWorker {
     this.authorizer = authorizer;
     pollInterval = serverProperties.getManagedTableCleanupPollInterval();
     sliceDuration = serverProperties.getManagedTableCleanupSliceDuration();
+    leaseDuration = serverProperties.getManagedTableCleanupLeaseDuration();
     deleteBatchSize = serverProperties.getManagedTableCleanupBatchSize();
   }
 
@@ -44,9 +44,7 @@ final class ManagedTableCleanupWorker {
    * Returns false only when no task was ready, allowing the caller to wait before polling again.
    */
   boolean processNext(String workerId, BooleanSupplier active) {
-    Date now = new Date();
-    Optional<CleanupTask> claimed =
-        cleanupRepository.claimNext(workerId, now, Date.from(now.toInstant().plus(LEASE_DURATION)));
+    Optional<CleanupTask> claimed = cleanupRepository.claimNext(workerId, leaseDuration);
     claimed.ifPresent(task -> processClaimedTask(workerId, task, active));
     return claimed.isPresent();
   }
@@ -56,9 +54,7 @@ final class ManagedTableCleanupWorker {
     try {
       NormalizedURL storageLocation = NormalizedURL.from(task.storageLocation());
       while (active.getAsBoolean() && !Thread.currentThread().isInterrupted()) {
-        Date now = new Date();
-        if (!cleanupRepository.renewLease(
-            task.tableId(), workerId, now, Date.from(now.toInstant().plus(LEASE_DURATION)))) {
+        if (!cleanupRepository.renewLease(task.tableId(), workerId, leaseDuration)) {
           logLostLease(task);
           return;
         }
@@ -69,17 +65,12 @@ final class ManagedTableCleanupWorker {
           return;
         }
         if (result == DeleteBatchResult.COMPLETE) {
-          Date completionTime = new Date();
-          if (!cleanupRepository.renewLease(
-              task.tableId(),
-              workerId,
-              completionTime,
-              Date.from(completionTime.toInstant().plus(LEASE_DURATION)))) {
+          if (!cleanupRepository.renewLease(task.tableId(), workerId, leaseDuration)) {
             logLostLease(task);
             return;
           }
           clearAuthorizations(task);
-          if (cleanupRepository.complete(task.tableId(), workerId, new Date())) {
+          if (cleanupRepository.complete(task.tableId(), workerId)) {
             LOGGER.info("Completed managed table cleanup for {}", task.tableId());
           } else {
             logLostLease(task);
@@ -87,12 +78,7 @@ final class ManagedTableCleanupWorker {
           return;
         }
         if (System.nanoTime() >= deadlineNanos) {
-          Date rescheduleTime = new Date();
-          if (!cleanupRepository.reschedule(
-              task.tableId(),
-              workerId,
-              rescheduleTime,
-              Date.from(rescheduleTime.toInstant().plus(pollInterval)))) {
+          if (!cleanupRepository.reschedule(task.tableId(), workerId, pollInterval)) {
             logLostLease(task);
           }
           return;
@@ -111,13 +97,7 @@ final class ManagedTableCleanupWorker {
   private void recordFailure(CleanupTask task, String workerId, RuntimeException failure) {
     Duration retryDelay = retryDelay(task.attemptCount());
     try {
-      Date failureTime = new Date();
-      if (!cleanupRepository.recordFailure(
-          task.tableId(),
-          workerId,
-          failureTime,
-          Date.from(failureTime.toInstant().plus(retryDelay)),
-          failure)) {
+      if (!cleanupRepository.recordFailure(task.tableId(), workerId, retryDelay, failure)) {
         logLostLease(task);
         return;
       }
@@ -136,8 +116,7 @@ final class ManagedTableCleanupWorker {
 
   private void releaseAfterStop(CleanupTask task, String workerId) {
     try {
-      Date now = new Date();
-      if (!cleanupRepository.reschedule(task.tableId(), workerId, now, now)) {
+      if (!cleanupRepository.reschedule(task.tableId(), workerId, Duration.ZERO)) {
         logLostLease(task);
       }
     } catch (RuntimeException e) {

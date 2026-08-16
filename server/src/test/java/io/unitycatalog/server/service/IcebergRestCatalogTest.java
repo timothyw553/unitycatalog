@@ -31,6 +31,7 @@ import java.io.IOException;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Date;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -353,6 +354,53 @@ public class IcebergRestCatalogTest extends BaseServerTest {
     assertThat(resp.status().code()).isEqualTo(400);
     assertThat(ErrorResponseParser.fromJson(resp.contentUtf8()).message())
         .contains("must match the registered table location");
+
+    // Every Iceberg REST visibility path must hide a tombstoned row.
+    try (Session session = hibernateConfigurator.getSessionFactory().openSession()) {
+      Transaction tx = session.beginTransaction();
+      TableInfoDAO tableInfoDAO =
+          session.get(TableInfoDAO.class, UUID.fromString(tableInfo.getTableId()));
+      Date tombstonedAt = new Date();
+      tableInfoDAO.setDeletedAt(tombstonedAt);
+      tableInfoDAO.setPurgeAfter(tombstonedAt);
+      tx.commit();
+    }
+
+    resp =
+        client
+            .head(
+                TEST_BASE_PREFIX
+                    + "/namespaces/"
+                    + TestUtils.SCHEMA_NAME
+                    + "/tables/"
+                    + TestUtils.TABLE_NAME)
+            .aggregate()
+            .join();
+    assertThat(resp.status().code()).isEqualTo(404);
+
+    resp =
+        client
+            .get(
+                TEST_BASE_PREFIX
+                    + "/namespaces/"
+                    + TestUtils.SCHEMA_NAME
+                    + "/tables/"
+                    + TestUtils.TABLE_NAME)
+            .aggregate()
+            .join();
+    assertThat(resp.status().code()).isEqualTo(404);
+
+    resp =
+        client
+            .get(TEST_BASE_PREFIX + "/namespaces/" + TestUtils.SCHEMA_NAME + "/tables")
+            .aggregate()
+            .join();
+    assertThat(resp.status().code()).isEqualTo(200);
+    assertThat(
+            IcebergObjectMapper.mapper()
+                .readValue(resp.contentUtf8(), ListTablesResponse.class)
+                .identifiers())
+        .isEmpty();
   }
 
   private Path writeIcebergMetadata() throws IOException, URISyntaxException {

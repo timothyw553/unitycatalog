@@ -211,9 +211,13 @@ public class ServerProperties {
   private static final DurationValidator DURATION_VALIDATOR = new DurationValidator();
   private static final DurationRangeValidator RETENTION_DURATION_VALIDATOR =
       new DurationRangeValidator(Duration.ZERO, Duration.ofDays(3650));
+  private static final DurationRangeValidator CREDENTIAL_DRAIN_DURATION_VALIDATOR =
+      new DurationRangeValidator(Duration.ZERO, Duration.ofDays(7));
   private static final DurationRangeValidator CLEANUP_POLL_INTERVAL_VALIDATOR =
       new DurationRangeValidator(Duration.ofMillis(1), Duration.ofHours(1));
   private static final DurationRangeValidator CLEANUP_SLICE_DURATION_VALIDATOR =
+      new DurationRangeValidator(Duration.ofMillis(1), Duration.ofDays(1));
+  private static final DurationRangeValidator CLEANUP_LEASE_DURATION_VALIDATOR =
       new DurationRangeValidator(Duration.ofMillis(1), Duration.ofDays(1));
   private static final IntegerValidator CLEANUP_WORKER_COUNT_VALIDATOR =
       new IntegerValidator(value -> value >= 1 && value <= 64, "an integer from 1 through 64");
@@ -238,8 +242,14 @@ public class ServerProperties {
     MANAGED_TABLE_ENABLED("server.managed-table.enabled", "true", BOOLEAN_VALIDATOR),
     MANAGED_TABLE_USE_DELTA_API_ONLY(
         "server.managed-table.use-delta-api-only", "false", BOOLEAN_VALIDATOR),
+    MANAGED_TABLE_LIFECYCLE_ENABLED(
+        "server.managed-table.lifecycle.enabled", "false", BOOLEAN_VALIDATOR),
     MANAGED_TABLE_RETENTION_DURATION(
         "server.managed-table.retention-duration", "PT0S", RETENTION_DURATION_VALIDATOR),
+    MANAGED_TABLE_CREDENTIAL_DRAIN_DURATION(
+        "server.managed-table.credential-drain-duration",
+        "PT1H5M",
+        CREDENTIAL_DRAIN_DURATION_VALIDATOR),
     MANAGED_TABLE_CLEANUP_ENABLED(
         "server.managed-table.cleanup.enabled", "true", BOOLEAN_VALIDATOR),
     MANAGED_TABLE_CLEANUP_POLL_INTERVAL(
@@ -250,6 +260,8 @@ public class ServerProperties {
         "server.managed-table.cleanup.slice-duration", "PT30M", CLEANUP_SLICE_DURATION_VALIDATOR),
     MANAGED_TABLE_CLEANUP_BATCH_SIZE(
         "server.managed-table.cleanup.batch-size", "1000", CLEANUP_BATCH_SIZE_VALIDATOR),
+    MANAGED_TABLE_CLEANUP_LEASE_DURATION(
+        "server.managed-table.cleanup.lease-duration", "PT5M", CLEANUP_LEASE_DURATION_VALIDATOR),
     UNIFORM_ICEBERG_V2_ALLOW_MISSING_DV(
         "server.managed-table.uniform-iceberg-v2.allow-missing-dv", "false", BOOLEAN_VALIDATOR),
     // `storage-root.*` are replaced by managed storage locations of catalog and schema.
@@ -547,6 +559,14 @@ public class ServerProperties {
     return Duration.parse(get(Property.MANAGED_TABLE_RETENTION_DURATION));
   }
 
+  public boolean isManagedTableLifecycleEnabled() {
+    return isTrueOrEnable(get(Property.MANAGED_TABLE_LIFECYCLE_ENABLED));
+  }
+
+  public Duration getManagedTableCredentialDrainDuration() {
+    return Duration.parse(get(Property.MANAGED_TABLE_CREDENTIAL_DRAIN_DURATION));
+  }
+
   public boolean isManagedTableCleanupEnabled() {
     return isTrueOrEnable(get(Property.MANAGED_TABLE_CLEANUP_ENABLED));
   }
@@ -565,6 +585,10 @@ public class ServerProperties {
 
   public int getManagedTableCleanupBatchSize() {
     return Integer.parseInt(get(Property.MANAGED_TABLE_CLEANUP_BATCH_SIZE));
+  }
+
+  public Duration getManagedTableCleanupLeaseDuration() {
+    return Duration.parse(get(Property.MANAGED_TABLE_CLEANUP_LEASE_DURATION));
   }
 
   /**
