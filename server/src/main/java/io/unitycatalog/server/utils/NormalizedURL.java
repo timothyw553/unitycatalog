@@ -110,6 +110,16 @@ public final class NormalizedURL {
     };
   }
 
+  /** Returns whether this URL identifies an entire local root, bucket, or container. */
+  public boolean isStorageRoot() {
+    URI uri = toUri();
+    UriScheme scheme = UriScheme.fromURI(uri);
+    if (scheme == UriScheme.FILE || scheme == UriScheme.NULL) {
+      return Paths.get(uri).getParent() == null;
+    }
+    return isCloudStorageRoot();
+  }
+
   /**
    * Converts a given input path or URI into a standardized URI string. This method ensures that
    * local file paths are correctly formatted as file URIs and that URIs for different storage
