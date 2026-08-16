@@ -74,6 +74,7 @@ public class ExternalLocationRepository {
           }
 
           NormalizedURL url = NormalizedURL.from(createExternalLocation.getUrl());
+          validateNotUsedByCleanup(session, url);
           ExternalLocationUtils.validateNotSameOrUnderManagedStoragePrefix(url);
           validateUrlNotUsedByAnyExternalLocation(session, url, Optional.empty());
 
@@ -164,6 +165,11 @@ public class ExternalLocationRepository {
             throw new BaseException(ErrorCode.NOT_FOUND, "External location not found: " + name);
           }
 
+          if ((updateExternalLocation.getUrl() != null
+              || updateExternalLocation.getCredentialName() != null)) {
+            validateNotUsedByCleanup(session, NormalizedURL.from(existingLocation.getUrl()));
+          }
+
           // Update fields if provided
           if (updateExternalLocation.getNewName() != null) {
             ValidationUtils.validateSqlObjectName(updateExternalLocation.getNewName());
@@ -176,6 +182,7 @@ public class ExternalLocationRepository {
           }
           if (updateExternalLocation.getUrl() != null) {
             NormalizedURL url = NormalizedURL.from(updateExternalLocation.getUrl());
+            validateNotUsedByCleanup(session, url);
             existingLocation.setUrl(url.toString());
             validateUrlNotUsedByAnyExternalLocation(
                 session, url, Optional.of(existingLocation.getId()));
@@ -230,11 +237,13 @@ public class ExternalLocationRepository {
           if (existingLocation == null) {
             throw new BaseException(ErrorCode.NOT_FOUND, "External location not found: " + name);
           }
+          NormalizedURL location = NormalizedURL.from(existingLocation.getUrl());
+          validateNotUsedByCleanup(session, location);
           // Check if the external location is in use by any data objects (tables, volumes, models)
           if (!force) {
             ExternalLocationUtils.getAllEntityDAOsWithURLOverlap(
                     session,
-                    NormalizedURL.from(existingLocation.getUrl()),
+                    location,
                     ExternalLocationUtils.DATA_SECURABLE_TYPES,
                     /* limit= */ 1,
                     /* includeParent= */ false,
@@ -311,5 +320,13 @@ public class ExternalLocationRepository {
                   "Cannot accept an external location that duplicates or overlaps with existing "
                       + "external location");
             });
+  }
+
+  private static void validateNotUsedByCleanup(Session session, NormalizedURL location) {
+    if (ExternalLocationUtils.isPathBeingDeleted(session, location)) {
+      throw new BaseException(
+          ErrorCode.FAILED_PRECONDITION,
+          "External location is still used by managed table cleanup");
+    }
   }
 }

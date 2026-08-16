@@ -9,6 +9,7 @@ import io.unitycatalog.server.auth.annotation.AuthorizeKey;
 import io.unitycatalog.server.exception.GlobalExceptionHandler;
 import io.unitycatalog.server.model.GenerateTemporaryPathCredential;
 import io.unitycatalog.server.model.PathOperation;
+import io.unitycatalog.server.persist.utils.ExternalLocationUtils;
 import io.unitycatalog.server.service.credential.CredentialContext;
 import io.unitycatalog.server.service.credential.StorageCredentialVendor;
 import io.unitycatalog.server.utils.NormalizedURL;
@@ -24,9 +25,13 @@ import static io.unitycatalog.server.service.credential.CredentialContext.Privil
 @ExceptionHandler(GlobalExceptionHandler.class)
 public class TemporaryPathCredentialsService {
   private final StorageCredentialVendor storageCredentialVendor;
+  private final ExternalLocationUtils externalLocationUtils;
 
-  public TemporaryPathCredentialsService(StorageCredentialVendor storageCredentialVendor) {
+  public TemporaryPathCredentialsService(
+      StorageCredentialVendor storageCredentialVendor,
+      ExternalLocationUtils externalLocationUtils) {
     this.storageCredentialVendor = storageCredentialVendor;
+    this.externalLocationUtils = externalLocationUtils;
   }
 
   private Set<CredentialContext.Privilege> pathOperationToPrivileges(PathOperation pathOperation) {
@@ -111,9 +116,12 @@ public class TemporaryPathCredentialsService {
       @AuthorizeResourceKey(value = EXTERNAL_LOCATION, key = "url")
       @AuthorizeKey(key = "operation")
       GenerateTemporaryPathCredential generateTemporaryPathCredential) {
+    NormalizedURL path = NormalizedURL.from(generateTemporaryPathCredential.getUrl());
+    // Authorization decorators are optional, so enforce the lifecycle boundary in the service too.
+    externalLocationUtils.validatePathNotBeingDeleted(path);
     return HttpResponse.ofJson(
         storageCredentialVendor.vendCredential(
-            NormalizedURL.from(generateTemporaryPathCredential.getUrl()),
+            path,
             pathOperationToPrivileges(generateTemporaryPathCredential.getOperation())));
   }
 }

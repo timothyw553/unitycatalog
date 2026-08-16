@@ -8,9 +8,11 @@ import io.unitycatalog.server.model.ListCredentialsResponse;
 import io.unitycatalog.server.model.UpdateCredentialRequest;
 import io.unitycatalog.server.persist.dao.CredentialDAO;
 import io.unitycatalog.server.persist.dao.ExternalLocationDAO;
+import io.unitycatalog.server.persist.utils.ExternalLocationUtils;
 import io.unitycatalog.server.persist.utils.PagedListingHelper;
 import io.unitycatalog.server.persist.utils.TransactionManager;
 import io.unitycatalog.server.utils.IdentityUtils;
+import io.unitycatalog.server.utils.NormalizedURL;
 import io.unitycatalog.server.utils.ServerProperties;
 import io.unitycatalog.server.utils.ValidationUtils;
 import java.util.ArrayList;
@@ -161,15 +163,23 @@ public class CredentialRepository {
           if (existingCredential == null) {
             throw new BaseException(ErrorCode.NOT_FOUND, "Credential not found: " + name);
           }
+          List<ExternalLocationDAO> externalLocations =
+              getExternalLocationsUsingCredential(session, existingCredential.getId());
+          if (externalLocations.stream()
+              .anyMatch(
+                  location ->
+                      ExternalLocationUtils.isPathBeingDeleted(
+                          session, NormalizedURL.from(location.getUrl())))) {
+            throw new BaseException(
+                ErrorCode.FAILED_PRECONDITION, "Credential is still used by managed table cleanup");
+          }
           if (!force) {
             // Check if it's still used by any external location.
-            ExternalLocationDAO externalLocationDAO =
-                getExternalLocationDAOUsingCredential(session, existingCredential.getId());
-            if (externalLocationDAO != null) {
+            if (!externalLocations.isEmpty()) {
               throw new BaseException(
                   ErrorCode.INVALID_ARGUMENT,
                   "Credential still used by external location '"
-                      + externalLocationDAO.getName()
+                      + externalLocations.get(0).getName()
                       + "'");
             }
           }
@@ -181,14 +191,13 @@ public class CredentialRepository {
         /* readOnly = */ false);
   }
 
-  protected ExternalLocationDAO getExternalLocationDAOUsingCredential(
+  private List<ExternalLocationDAO> getExternalLocationsUsingCredential(
       Session session, UUID credentialId) {
     Query<ExternalLocationDAO> query =
         session.createQuery(
             "FROM ExternalLocationDAO WHERE credentialId = :value", ExternalLocationDAO.class);
     query.setParameter("value", credentialId);
-    query.setMaxResults(1);
-    return query.uniqueResult();
+    return query.getResultList();
   }
 
   private Optional<String> getAwsS3MasterRoleArn() {

@@ -11,6 +11,7 @@ import io.unitycatalog.server.persist.dao.IdentifiableDAO;
 import io.unitycatalog.server.persist.dao.RegisteredModelInfoDAO;
 import io.unitycatalog.server.persist.dao.SchemaInfoDAO;
 import io.unitycatalog.server.persist.dao.StagingTableDAO;
+import io.unitycatalog.server.persist.dao.TableCleanupTaskDAO;
 import io.unitycatalog.server.persist.dao.TableInfoDAO;
 import io.unitycatalog.server.persist.dao.VolumeInfoDAO;
 import io.unitycatalog.server.utils.Constants;
@@ -65,8 +66,8 @@ public class ExternalLocationUtils {
    * @param filterCondition additional HQL filter condition (empty string if none)
    */
   private record DaoClassInfo(
-      Class<? extends IdentifiableDAO> clazz, String urlFieldName, String filterCondition) {
-    DaoClassInfo(Class<? extends IdentifiableDAO> clazz, String urlFieldName) {
+      Class<?> clazz, String urlFieldName, String filterCondition) {
+    DaoClassInfo(Class<?> clazz, String urlFieldName) {
       this(clazz, urlFieldName, "");
     }
   }
@@ -84,6 +85,11 @@ public class ExternalLocationUtils {
   @VisibleForTesting
   static final DaoClassInfo UNCOMMITTED_STAGING_TABLE_DAO_INFO =
       new DaoClassInfo(StagingTableDAO.class, "stagingLocation", "stageCommitted=false");
+
+  private static final DaoClassInfo TOMBSTONED_TABLE_DAO_INFO =
+      new DaoClassInfo(TableInfoDAO.class, "url", "deletedAt IS NOT NULL");
+  private static final DaoClassInfo CLEANUP_TASK_DAO_INFO =
+      new DaoClassInfo(TableCleanupTaskDAO.class, "storageLocation");
 
   /**
    * List of securable types that represent data objects (tables, volumes, registered models). Used
@@ -126,6 +132,8 @@ public class ExternalLocationUtils {
   }
 
   private Map<SecurableType, UUID> getMapResourceIdsForPath(Session session, NormalizedURL url) {
+    denyPathBeingDeleted(session, url);
+
     // 1. Fail if it's parent of any of the data securable or external location
     if (!getAllEntityDAOsWithURLOverlap(
             session,
@@ -150,6 +158,47 @@ public class ExternalLocationUtils {
     // 3. If it's under only one external location, use that external location as resource id
     return getResourceIdOfOwnerEntity(session, url, List.of(SecurableType.EXTERNAL_LOCATION))
         .orElse(Map.of());
+  }
+
+  /** Rejects credentials for any path that overlaps a tombstone or durable cleanup task. */
+  public void validatePathNotBeingDeleted(NormalizedURL url) {
+    TransactionManager.executeWithTransaction(
+        sessionFactory,
+        session -> {
+          denyPathBeingDeleted(session, url);
+          return null;
+        },
+        "Failed to validate managed table lifecycle path",
+        /* readOnly = */ true);
+  }
+
+  private static void denyPathBeingDeleted(Session session, NormalizedURL url) {
+    if (isPathBeingDeleted(session, url)) {
+      throw new BaseException(
+          ErrorCode.PERMISSION_DENIED,
+          "Temporary credentials are unavailable while managed table storage is being deleted.");
+    }
+  }
+
+  /** Returns true for parent, exact, or child overlap with lifecycle-owned managed storage. */
+  public static boolean isPathBeingDeleted(Session session, NormalizedURL url) {
+    return hasURLOverlap(session, url, TOMBSTONED_TABLE_DAO_INFO)
+        || hasURLOverlap(session, url, CLEANUP_TASK_DAO_INFO);
+  }
+
+  private static boolean hasURLOverlap(
+      Session session, NormalizedURL url, DaoClassInfo daoClassInfo) {
+    return generateEntitiesDAOsWithURLOverlapQuery(
+            session,
+            url,
+            daoClassInfo,
+            /* limit= */ 1,
+            /* includeParent= */ true,
+            /* includeSelf= */ true,
+            /* includeSubdir= */ true)
+        .stream()
+        .findAny()
+        .isPresent();
   }
 
   private Optional<Map<SecurableType, UUID>> getResourceIdOfOwnerEntity(
@@ -388,7 +437,8 @@ public class ExternalLocationUtils {
   }
 
   @VisibleForTesting
-  static <T extends IdentifiableDAO> Query<T> generateEntitiesDAOsWithURLOverlapQuery(
+  @SuppressWarnings("unchecked")
+  static <T> Query<T> generateEntitiesDAOsWithURLOverlapQuery(
       Session session,
       NormalizedURL url,
       DaoClassInfo daoClassInfo,
@@ -521,6 +571,11 @@ public class ExternalLocationUtils {
    * catalog/schema storage locations or uncommitted staging tables.
    */
   private static void validateNotAboveManagedStorage(Session session, NormalizedURL url) {
+    if (hasURLOverlap(session, url, CLEANUP_TASK_DAO_INFO)) {
+      throw new BaseException(
+          ErrorCode.INVALID_ARGUMENT, "Input path '" + url + "' overlaps with managed storage.");
+    }
+
     if (!getAllEntityDAOsWithURLOverlap(
             session,
             url,
