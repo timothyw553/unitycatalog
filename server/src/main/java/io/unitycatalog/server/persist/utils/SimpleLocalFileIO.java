@@ -4,9 +4,13 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
+import java.nio.file.DirectoryNotEmptyException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Comparator;
 import java.util.stream.Stream;
@@ -125,6 +129,50 @@ public class SimpleLocalFileIO implements DelegateFileIO {
   }
 
   /**
+   * Deletes a bounded batch of empty directories below {@code prefix}, children first. This is the
+   * final local-filesystem phase after all regular files have been deleted.
+   *
+   * @return true once the prefix itself no longer exists
+   */
+  public static boolean deleteEmptyDirectories(String prefix, int maxDirectories) {
+    if (maxDirectories <= 0) {
+      throw new IllegalArgumentException("maxDirectories must be positive");
+    }
+    Path root = toPath(prefix);
+    if (!Files.exists(root)) {
+      return true;
+    }
+
+    try {
+      Files.walkFileTree(
+          root,
+          new SimpleFileVisitor<>() {
+            private int attempted;
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path directory, IOException failure)
+                throws IOException {
+              if (failure != null) {
+                throw failure;
+              }
+              try {
+                Files.deleteIfExists(directory);
+              } catch (DirectoryNotEmptyException ignored) {
+                // A late file remains. The next file batch will remove it.
+              }
+              attempted++;
+              return attempted >= maxDirectories
+                  ? FileVisitResult.TERMINATE
+                  : FileVisitResult.CONTINUE;
+            }
+          });
+    } catch (IOException e) {
+      throw new UncheckedIOException("Failed to delete empty directories below " + prefix, e);
+    }
+    return !Files.exists(root);
+  }
+
+  /**
    * Walks the tree under {@code prefix} and returns a lazy, close-safe view of its entries. When
    * {@code includeDirectories} is false, only regular files are returned (the {@link #listPrefix}
    * contract); when true, directories are included as well. When {@code bottomUp} is true, entries
@@ -146,7 +194,7 @@ public class SimpleLocalFileIO implements DelegateFileIO {
     }
     Stream<Path> entries = walk;
     if (!includeDirectories) {
-      entries = entries.filter(Files::isRegularFile);
+      entries = entries.filter(path -> !Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS));
     }
     if (bottomUp) {
       // reverseOrder puts children before parents; .sorted() also buffers the full tree before
@@ -159,7 +207,8 @@ public class SimpleLocalFileIO implements DelegateFileIO {
   private static FileInfo toFileInfo(Path path) {
     try {
       // Fetch size and mtime in a single stat rather than one syscall each.
-      BasicFileAttributes attrs = Files.readAttributes(path, BasicFileAttributes.class);
+      BasicFileAttributes attrs =
+          Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
       return new FileInfo(
           path.toUri().toString(), attrs.size(), attrs.lastModifiedTime().toMillis());
     } catch (IOException e) {
