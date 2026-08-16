@@ -11,6 +11,7 @@ import io.unitycatalog.server.auth.decorator.UnityAccessUtil;
 import io.unitycatalog.server.exception.BaseException;
 import io.unitycatalog.server.exception.BaseExceptionHandler;
 import io.unitycatalog.server.exception.ErrorCode;
+import io.unitycatalog.server.lifecycle.ManagedTableLifecycleManager;
 import io.unitycatalog.server.persist.Repositories;
 import io.unitycatalog.server.persist.utils.FileOperations;
 import io.unitycatalog.server.persist.utils.HibernateConfigurator;
@@ -59,6 +60,7 @@ public class UnityCatalogServer implements AutoCloseable {
   private static final int DEFAULT_PORT = 8080;
   public static final String SERVER_PROPERTIES_FILE = "etc/conf/server.properties";
   private final Server server;
+  private final ManagedTableLifecycleManager managedTableLifecycleManager;
   private final SecurityContext securityContext;
   private final HibernateConfigurator hibernateConfigurator;
   /** True when this server built the configurator itself and must therefore close it. */
@@ -83,7 +85,9 @@ public class UnityCatalogServer implements AutoCloseable {
             ? new HibernateConfigurator(unityCatalogServerBuilder.serverProperties)
             : unityCatalogServerBuilder.hibernateConfigurator;
     try {
-      this.server = initializeServer(unityCatalogServerBuilder);
+      InitializedServer initializedServer = initializeServer(unityCatalogServerBuilder);
+      this.server = initializedServer.server();
+      this.managedTableLifecycleManager = initializedServer.lifecycleManager();
     } catch (Throwable t) {
       // Construction failed after the SessionFactory was built; close it so a failed boot does
       // not leak its connection pool. Errors matter as much as RuntimeExceptions here: a
@@ -117,7 +121,9 @@ public class UnityCatalogServer implements AutoCloseable {
     }
   }
 
-  private Server initializeServer(UnityCatalogServer.Builder unityCatalogServerBuilder) {
+  private record InitializedServer(Server server, ManagedTableLifecycleManager lifecycleManager) {}
+
+  private InitializedServer initializeServer(UnityCatalogServer.Builder unityCatalogServerBuilder) {
     ArmeriaServerBuilder armeriaServerBuilder =
         new ArmeriaServerBuilder(unityCatalogServerBuilder.port, BASE_PATH, CONTROL_PATH);
 
@@ -135,12 +141,19 @@ public class UnityCatalogServer implements AutoCloseable {
     BaseExceptionHandler.setIncludeStackTrace(
         unityCatalogServerBuilder.serverProperties.isIncludeStackTraceInError());
     // Init services
-    addApiServices(armeriaServerBuilder, unityCatalogServerBuilder, authorizer, repositories);
+    FileOperations fileOperations =
+        addApiServices(armeriaServerBuilder, unityCatalogServerBuilder, authorizer, repositories);
     // Init security decorators
     addSecurityDecorators(
         armeriaServerBuilder, unityCatalogServerBuilder.serverProperties, authorizer, repositories);
 
-    return armeriaServerBuilder.build();
+    ManagedTableLifecycleManager lifecycleManager =
+        new ManagedTableLifecycleManager(
+            repositories.getTableCleanupRepository(),
+            fileOperations,
+            authorizer,
+            unityCatalogServerBuilder.serverProperties);
+    return new InitializedServer(armeriaServerBuilder.build(), lifecycleManager);
   }
 
   private UnityCatalogAuthorizer initializeAuthorizer(
@@ -162,7 +175,7 @@ public class UnityCatalogServer implements AutoCloseable {
     }
   }
 
-  private void addApiServices(
+  private FileOperations addApiServices(
       ArmeriaServerBuilder armeriaServerBuilder,
       UnityCatalogServer.Builder unityCatalogServerBuilder,
       UnityCatalogAuthorizer authorizer,
@@ -221,6 +234,7 @@ public class UnityCatalogServer implements AutoCloseable {
     addIcebergApiServices(armeriaServerBuilder, schemaService, repositories, fileOperations);
     addDeltaApiServices(
         armeriaServerBuilder, authorizer, repositories, serverProperties, storageCredentialVendor);
+    return fileOperations;
   }
 
   private void addIcebergApiServices(
@@ -284,11 +298,13 @@ public class UnityCatalogServer implements AutoCloseable {
   public void start() {
     LOGGER.info("Starting Unity Catalog server...");
     server.start().join();
+    managedTableLifecycleManager.start();
     LOGGER.info("Unity Catalog server started.");
   }
 
   /** Stops the HTTP server. The server can be restarted afterwards with {@link #start()}. */
   public void stop() {
+    managedTableLifecycleManager.stop();
     server.stop().join();
     LOGGER.info("Unity Catalog server stopped.");
   }

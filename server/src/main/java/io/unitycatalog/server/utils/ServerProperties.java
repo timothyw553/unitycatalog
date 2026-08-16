@@ -215,6 +215,8 @@ public class ServerProperties {
       new DurationRangeValidator(Duration.ofMillis(1), Duration.ofHours(1));
   private static final DurationRangeValidator CLEANUP_SLICE_DURATION_VALIDATOR =
       new DurationRangeValidator(Duration.ofMillis(1), Duration.ofDays(1));
+  private static final IntegerValidator CLEANUP_WORKER_COUNT_VALIDATOR =
+      new IntegerValidator(value -> value >= 1 && value <= 64, "an integer from 1 through 64");
   private static final IntegerValidator CLEANUP_BATCH_SIZE_VALIDATOR =
       new IntegerValidator(
           value -> value >= 1 && value <= 10000, "an integer from 1 through 10000");
@@ -238,8 +240,12 @@ public class ServerProperties {
         "server.managed-table.use-delta-api-only", "false", BOOLEAN_VALIDATOR),
     MANAGED_TABLE_RETENTION_DURATION(
         "server.managed-table.retention-duration", "PT0S", RETENTION_DURATION_VALIDATOR),
+    MANAGED_TABLE_CLEANUP_ENABLED(
+        "server.managed-table.cleanup.enabled", "true", BOOLEAN_VALIDATOR),
     MANAGED_TABLE_CLEANUP_POLL_INTERVAL(
         "server.managed-table.cleanup.poll-interval", "PT5S", CLEANUP_POLL_INTERVAL_VALIDATOR),
+    MANAGED_TABLE_CLEANUP_WORKER_COUNT(
+        "server.managed-table.cleanup.worker-count", "2", CLEANUP_WORKER_COUNT_VALIDATOR),
     MANAGED_TABLE_CLEANUP_SLICE_DURATION(
         "server.managed-table.cleanup.slice-duration", "PT30M", CLEANUP_SLICE_DURATION_VALIDATOR),
     MANAGED_TABLE_CLEANUP_BATCH_SIZE(
@@ -541,8 +547,16 @@ public class ServerProperties {
     return Duration.parse(get(Property.MANAGED_TABLE_RETENTION_DURATION));
   }
 
+  public boolean isManagedTableCleanupEnabled() {
+    return isTrueOrEnable(get(Property.MANAGED_TABLE_CLEANUP_ENABLED));
+  }
+
   public Duration getManagedTableCleanupPollInterval() {
     return Duration.parse(get(Property.MANAGED_TABLE_CLEANUP_POLL_INTERVAL));
+  }
+
+  public int getManagedTableCleanupWorkerCount() {
+    return Integer.parseInt(get(Property.MANAGED_TABLE_CLEANUP_WORKER_COUNT));
   }
 
   public Duration getManagedTableCleanupSliceDuration() {
