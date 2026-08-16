@@ -218,6 +218,8 @@ public class ServerPropertiesTest {
     testInvalidProperty(
         Property.MANAGED_TABLE_CLEANUP_POLL_INTERVAL, "PT0S", "Expected a duration between");
     testInvalidProperty(
+        Property.MANAGED_TABLE_CLEANUP_WORKER_COUNT, "65", "an integer from 1 through 64");
+    testInvalidProperty(
         Property.MANAGED_TABLE_CLEANUP_BATCH_SIZE, "10001", "an integer from 1 through 10000");
   }
 

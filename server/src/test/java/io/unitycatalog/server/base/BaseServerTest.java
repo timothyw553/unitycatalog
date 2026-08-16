@@ -57,6 +57,7 @@ public abstract class BaseServerTest {
     serverProperties = new Properties();
     serverProperties.setProperty(Property.SERVER_ENV.getKey(), "test");
     serverProperties.setProperty(Property.INCLUDE_STACK_TRACE_IN_ERROR.getKey(), "true");
+    serverProperties.setProperty(Property.MANAGED_TABLE_CLEANUP_ENABLED.getKey(), "false");
     tableStorageRoot = getManagedStorageCloudPath(testDirectoryRoot);
     serverProperties.setProperty(Property.TABLE_STORAGE_ROOT.getKey(), tableStorageRoot);
   }
