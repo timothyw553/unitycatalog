@@ -202,6 +202,8 @@ public class DeltaApiService extends AuthorizedService {
         storageCredentialVendor.vendCredential(
             stagingLocation,
             Set.of(CredentialContext.Privilege.SELECT, CredentialContext.Privilege.UPDATE));
+    tableRepository.validateManagedCredentialIssuance(
+        UUID.fromString(staging.getId()), stagingLocation, credentials.getExpirationTime());
     return DeltaStagingTableMapper.toStagingTableResponse(staging, credentials);
   }
 
@@ -337,9 +339,12 @@ public class DeltaApiService extends AuthorizedService {
       @Param("schema") @AuthorizeResourceKey(SCHEMA) String schema,
       @Param("table") @AuthorizeResourceKey(TABLE) String table,
       @Param("operation") @AuthorizeKey DeltaCredentialOperation operation) {
-    NormalizedURL storageLocation = tableRepository.getTableStorageLocation(catalog, schema, table);
+    TableInfoDAO tableInfo = tableRepository.findTableOrThrow(catalog, schema, table);
+    NormalizedURL storageLocation = NormalizedURL.from(tableInfo.getUrl());
     TemporaryCredentials credentials =
         storageCredentialVendor.vendCredential(storageLocation, toPrivileges(operation));
+    tableRepository.validateManagedCredentialIssuance(
+        tableInfo.getId(), storageLocation, credentials.getExpirationTime());
     return DeltaCredentialsMapper.toCredentialsResponse(credentials, operation);
   }
 
@@ -353,12 +358,15 @@ public class DeltaApiService extends AuthorizedService {
   @AuthorizeExpression("#authorize(#principal, #table, OWNER)")
   public DeltaCredentialsResponse getStagingTableCredentials(
       @Param("table_id") @AuthorizeResourceKey(TABLE) String tableId) {
+    UUID stagingTableId = UUID.fromString(tableId);
     NormalizedURL storageLocation =
-        tableRepository.getStagingTableStorageLocation(UUID.fromString(tableId));
+        tableRepository.getStagingTableStorageLocation(stagingTableId);
     TemporaryCredentials credentials =
         storageCredentialVendor.vendCredential(
             storageLocation,
             Set.of(CredentialContext.Privilege.SELECT, CredentialContext.Privilege.UPDATE));
+    tableRepository.validateManagedCredentialIssuance(
+        stagingTableId, storageLocation, credentials.getExpirationTime());
     return DeltaCredentialsMapper.toCredentialsResponse(
         credentials, DeltaCredentialOperation.READ_WRITE);
   }

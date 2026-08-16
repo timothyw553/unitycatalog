@@ -140,6 +140,86 @@ public class TableRepository {
   }
 
   /**
+   * Rechecks a newly vended credential against the table row while sharing DROP's row lock.
+   * Credential vending happens before this short transaction so a cloud call never holds a DB
+   * lock. If DROP wins during vending, this check rejects the credential before it reaches the
+   * client. If this check wins, DROP starts its drain window only after the credential is known to
+   * be bounded.
+   */
+  public void validateManagedCredentialIssuance(
+      UUID tableId, NormalizedURL expectedLocation, Long expirationTime) {
+    if (!managedTableLifecycleEnabled) {
+      return;
+    }
+    TransactionManager.executeWithTransaction(
+        sessionFactory,
+        session -> {
+          String actualLocation;
+          boolean managed;
+          TableInfoDAO table =
+              session.find(TableInfoDAO.class, tableId, LockModeType.PESSIMISTIC_WRITE);
+          if (table != null) {
+            if (table.getDeletedAt() != null) {
+              throw new BaseException(
+                  ErrorCode.TABLE_NOT_FOUND, "Table not found with id: " + tableId);
+            }
+            actualLocation = table.getUrl();
+            managed = TableType.MANAGED.getValue().equals(table.getType());
+          } else {
+            StagingTableDAO staging =
+                session.find(StagingTableDAO.class, tableId, LockModeType.PESSIMISTIC_WRITE);
+            if (staging == null || staging.isStageCommitted()) {
+              throw new BaseException(
+                  ErrorCode.TABLE_NOT_FOUND, "Table not found with id: " + tableId);
+            }
+            actualLocation = staging.getStagingLocation();
+            managed = true;
+          }
+
+          if (!expectedLocation.equals(NormalizedURL.from(actualLocation))) {
+            throw new BaseException(
+                ErrorCode.TABLE_NOT_FOUND, "Table storage changed while vending credentials");
+          }
+          if (managed) {
+            validateCredentialExpiration(session, expectedLocation, expirationTime);
+          }
+          return null;
+        },
+        "Failed to validate managed table credential issuance",
+        /* readOnly = */ false);
+  }
+
+  /** Ensures public path credentials cannot outlive the managed-table cleanup drain. */
+  public void validatePathCredentialIssuance(NormalizedURL path, Long expirationTime) {
+    if (!managedTableLifecycleEnabled) {
+      return;
+    }
+    TransactionManager.executeWithTransaction(
+        sessionFactory,
+        session -> {
+          validateCredentialExpiration(session, path, expirationTime);
+          return null;
+        },
+        "Failed to validate path credential issuance",
+        /* readOnly = */ true);
+  }
+
+  private void validateCredentialExpiration(
+      Session session, NormalizedURL location, Long expirationTime) {
+    UriScheme scheme = UriScheme.fromURI(location.toUri());
+    if (scheme == UriScheme.FILE || scheme == UriScheme.NULL) {
+      return;
+    }
+    Date latestAllowed =
+        Date.from(DatabaseTime.now(session).toInstant().plus(managedTableCredentialDrain));
+    if (expirationTime == null || expirationTime > latestAllowed.getTime()) {
+      throw new BaseException(
+          ErrorCode.FAILED_PRECONDITION,
+          "Cloud credentials must expire within the managed table credential drain");
+    }
+  }
+
+  /**
    * Looks up the storage location for a regular table by its three-part name. Only reads what the
    * caller actually needs (the storage URL) rather than hydrating the full {@link TableInfo} with
    * columns and properties. Accepts the three parts separately so callers don't have to round-trip

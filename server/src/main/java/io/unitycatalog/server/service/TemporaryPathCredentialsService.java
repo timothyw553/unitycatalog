@@ -9,6 +9,8 @@ import io.unitycatalog.server.auth.annotation.AuthorizeKey;
 import io.unitycatalog.server.exception.GlobalExceptionHandler;
 import io.unitycatalog.server.model.GenerateTemporaryPathCredential;
 import io.unitycatalog.server.model.PathOperation;
+import io.unitycatalog.server.model.TemporaryCredentials;
+import io.unitycatalog.server.persist.TableRepository;
 import io.unitycatalog.server.persist.utils.ExternalLocationUtils;
 import io.unitycatalog.server.service.credential.CredentialContext;
 import io.unitycatalog.server.service.credential.StorageCredentialVendor;
@@ -26,12 +28,15 @@ import static io.unitycatalog.server.service.credential.CredentialContext.Privil
 public class TemporaryPathCredentialsService {
   private final StorageCredentialVendor storageCredentialVendor;
   private final ExternalLocationUtils externalLocationUtils;
+  private final TableRepository tableRepository;
 
   public TemporaryPathCredentialsService(
       StorageCredentialVendor storageCredentialVendor,
-      ExternalLocationUtils externalLocationUtils) {
+      ExternalLocationUtils externalLocationUtils,
+      TableRepository tableRepository) {
     this.storageCredentialVendor = storageCredentialVendor;
     this.externalLocationUtils = externalLocationUtils;
+    this.tableRepository = tableRepository;
   }
 
   private Set<CredentialContext.Privilege> pathOperationToPrivileges(PathOperation pathOperation) {
@@ -119,9 +124,13 @@ public class TemporaryPathCredentialsService {
     NormalizedURL path = NormalizedURL.from(generateTemporaryPathCredential.getUrl());
     // Authorization decorators are optional, so enforce the lifecycle boundary in the service too.
     externalLocationUtils.validatePathNotBeingDeleted(path);
-    return HttpResponse.ofJson(
+    TemporaryCredentials credentials =
         storageCredentialVendor.vendCredential(
             path,
-            pathOperationToPrivileges(generateTemporaryPathCredential.getOperation())));
+            pathOperationToPrivileges(generateTemporaryPathCredential.getOperation()));
+    // Recheck after the cloud call so a concurrent DROP cannot return a newly-vended credential.
+    externalLocationUtils.validatePathNotBeingDeleted(path);
+    tableRepository.validatePathCredentialIssuance(path, credentials.getExpirationTime());
+    return HttpResponse.ofJson(credentials);
   }
 }
