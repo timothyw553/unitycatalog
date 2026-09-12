@@ -170,6 +170,26 @@ public class ServerProperties {
     }
   }
 
+  /** Validator for durations represented by at least one millisecond. */
+  private static class PositiveDurationValidator implements PropertyValidator {
+    @Override
+    public void validate(String key, String value) {
+      try {
+        if (Duration.parse(value).compareTo(Duration.ofMillis(1)) < 0) {
+          throw new BaseException(
+              ErrorCode.INVALID_ARGUMENT,
+              String.format(
+                  "Invalid value '%s' for property '%s'. Expected at least one millisecond",
+                  value, key));
+        }
+      } catch (DateTimeParseException e) {
+        throw new BaseException(
+            ErrorCode.INVALID_ARGUMENT,
+            String.format("Invalid value '%s' for property '%s': %s", value, key, e.getMessage()));
+      }
+    }
+  }
+
   /** No-op validator that accepts any value */
   private static class NoOpValidator implements PropertyValidator {
     @Override
@@ -185,6 +205,8 @@ public class ServerProperties {
       new PositiveIntegerValidator();
   private static final NoOpValidator NOOP_VALIDATOR = new NoOpValidator();
   private static final DurationValidator DURATION_VALIDATOR = new DurationValidator();
+  private static final PositiveDurationValidator POSITIVE_DURATION_VALIDATOR =
+      new PositiveDurationValidator();
 
   @Getter
   public enum Property {
@@ -196,6 +218,18 @@ public class ServerProperties {
         "server.authorization.policy-refresh-interval", "PT1M", DURATION_VALIDATOR),
     POLICY_REFRESH_DEBOUNCE_INTERVAL(
         "server.authorization.policy-refresh-debounce-interval", "PT1S", DURATION_VALIDATOR),
+    STORAGE_CLEANUP_POLL_INTERVAL(
+        "server.storage-cleanup.poll-interval", "PT5S", POSITIVE_DURATION_VALIDATOR),
+    STORAGE_CLEANUP_BATCH_SIZE(
+        "server.storage-cleanup.batch-size", "1000", POSITIVE_INTEGER_VALIDATOR),
+    STORAGE_CLEANUP_TIME_SLICE(
+        "server.storage-cleanup.time-slice", "PT20S", POSITIVE_DURATION_VALIDATOR),
+    STORAGE_CLEANUP_REQUEST_TIMEOUT(
+        "server.storage-cleanup.request-timeout", "PT5S", POSITIVE_DURATION_VALIDATOR),
+    STORAGE_CLEANUP_LEASE_DURATION(
+        "server.storage-cleanup.lease-duration", "PT1M", POSITIVE_DURATION_VALIDATOR),
+    STORAGE_CLEANUP_RETRY_BACKOFF(
+        "server.storage-cleanup.retry-backoff", "PT30S", POSITIVE_DURATION_VALIDATOR),
     AUTHORIZATION_URL("server.authorization-url", URL_VALIDATOR),
     TOKEN_URL("server.token-url", URL_VALIDATOR),
     CLIENT_ID("server.client-id"),
@@ -279,6 +313,21 @@ public class ServerProperties {
       property.validator.validate(property.key, value);
     }
     validateAuthAllowlistConfiguration();
+    validateStorageCleanupConfiguration();
+  }
+
+  private void validateStorageCleanupConfiguration() {
+    Duration timeSlice = getStorageCleanupTimeSlice();
+    if (getStorageCleanupRequestTimeout().compareTo(timeSlice.dividedBy(2)) > 0) {
+      throw new BaseException(
+          ErrorCode.INVALID_ARGUMENT,
+          "server.storage-cleanup.time-slice must allow one list and delete request");
+    }
+    if (getStorageCleanupLeaseDuration().compareTo(timeSlice) <= 0) {
+      throw new BaseException(
+          ErrorCode.INVALID_ARGUMENT,
+          "server.storage-cleanup.lease-duration must be longer than the cleanup time slice");
+    }
   }
 
   private void validateAuthAllowlistConfiguration() {
@@ -481,6 +530,30 @@ public class ServerProperties {
 
   public Duration getPolicyRefreshDebounceInterval() {
     return Duration.parse(get(Property.POLICY_REFRESH_DEBOUNCE_INTERVAL));
+  }
+
+  public Duration getStorageCleanupPollInterval() {
+    return Duration.parse(get(Property.STORAGE_CLEANUP_POLL_INTERVAL));
+  }
+
+  public int getStorageCleanupBatchSize() {
+    return Integer.parseInt(get(Property.STORAGE_CLEANUP_BATCH_SIZE));
+  }
+
+  public Duration getStorageCleanupTimeSlice() {
+    return Duration.parse(get(Property.STORAGE_CLEANUP_TIME_SLICE));
+  }
+
+  public Duration getStorageCleanupRequestTimeout() {
+    return Duration.parse(get(Property.STORAGE_CLEANUP_REQUEST_TIMEOUT));
+  }
+
+  public Duration getStorageCleanupLeaseDuration() {
+    return Duration.parse(get(Property.STORAGE_CLEANUP_LEASE_DURATION));
+  }
+
+  public Duration getStorageCleanupRetryBackoff() {
+    return Duration.parse(get(Property.STORAGE_CLEANUP_RETRY_BACKOFF));
   }
 
   public boolean isIncludeStackTraceInError() {

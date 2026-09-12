@@ -8,6 +8,10 @@ import io.unitycatalog.server.auth.JCasbinAuthorizer;
 import io.unitycatalog.server.auth.UnityCatalogAuthorizer;
 import io.unitycatalog.server.auth.decorator.UnityAccessDecorator;
 import io.unitycatalog.server.auth.decorator.UnityAccessUtil;
+import io.unitycatalog.server.cleanup.StorageCleanupAdapterFactory;
+import io.unitycatalog.server.cleanup.StorageCleanupAttempt;
+import io.unitycatalog.server.cleanup.StorageCleanupPoller;
+import io.unitycatalog.server.cleanup.StorageCleanupWorker;
 import io.unitycatalog.server.exception.BaseException;
 import io.unitycatalog.server.exception.BaseExceptionHandler;
 import io.unitycatalog.server.exception.ErrorCode;
@@ -48,6 +52,8 @@ import io.unitycatalog.server.utils.VersionUtils;
 import io.vertx.core.Verticle;
 import io.vertx.core.Vertx;
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.concurrent.CompletionException;
 import org.apache.logging.log4j.core.config.Configurator;
 import org.slf4j.Logger;
@@ -68,6 +74,9 @@ public class UnityCatalogServer implements AutoCloseable {
 
   /** Set during {@link #initializeServer}; may be null if construction fails early. */
   private UnityCatalogAuthorizer authorizer;
+
+  /** Set during {@link #initializeServer}; may be null if construction fails early. */
+  private StorageCleanupPoller cleanupPoller;
 
   static {
     System.setProperty("log4j.configurationFile", "etc/conf/server.log4j2.properties");
@@ -93,6 +102,7 @@ public class UnityCatalogServer implements AutoCloseable {
       // Construction failed after the SessionFactory was built; close it so a failed boot does
       // not leak its connection pool. Errors matter as much as RuntimeExceptions here: a
       // NoClassDefFoundError out of initializeServer() would leak the pool just the same.
+      closeCleanupPoller(t);
       closeAuthorizer(t);
       closeOwnedSessionFactory(t);
       throw t;
@@ -167,8 +177,45 @@ public class UnityCatalogServer implements AutoCloseable {
     // Init security decorators
     addSecurityDecorators(
         armeriaServerBuilder, unityCatalogServerBuilder.serverProperties, authorizer, repositories);
+    initializeCleanup(unityCatalogServerBuilder.serverProperties, repositories);
 
     return armeriaServerBuilder.build();
+  }
+
+  private void initializeCleanup(ServerProperties serverProperties, Repositories repositories) {
+    Duration timeSlice = serverProperties.getStorageCleanupTimeSlice();
+    Duration requestTimeout = serverProperties.getStorageCleanupRequestTimeout();
+    Duration leaseDuration = serverProperties.getStorageCleanupLeaseDuration();
+    StorageCleanupAttempt attempt =
+        new StorageCleanupAttempt(
+            serverProperties.getStorageCleanupBatchSize(), timeSlice, requestTimeout);
+    StorageCleanupWorker worker =
+        new StorageCleanupWorker(
+            repositories.getStorageCleanupTaskRepository(),
+            new StorageCleanupAdapterFactory(
+                repositories.getStorageCredentialVendor(), serverProperties),
+            attempt,
+            Clock.systemUTC(),
+            leaseDuration,
+            requestTimeout,
+            serverProperties.getStorageCleanupRetryBackoff());
+    cleanupPoller = new StorageCleanupPoller(worker);
+    cleanupPoller.start(serverProperties.getStorageCleanupPollInterval());
+  }
+
+  private void closeCleanupPoller(Throwable primaryFailure) {
+    if (cleanupPoller == null) {
+      return;
+    }
+    try {
+      cleanupPoller.close();
+    } catch (Throwable closeFailure) {
+      if (primaryFailure != null) {
+        primaryFailure.addSuppressed(closeFailure);
+      } else {
+        LOGGER.warn("Failed to close the storage cleanup poller", closeFailure);
+      }
+    }
   }
 
   private UnityCatalogAuthorizer initializeAuthorizer(
@@ -347,6 +394,7 @@ public class UnityCatalogServer implements AutoCloseable {
     try {
       stop();
     } finally {
+      closeCleanupPoller(null);
       closeAuthorizer(null);
       if (ownsHibernateConfigurator) {
         hibernateConfigurator.getSessionFactory().close();

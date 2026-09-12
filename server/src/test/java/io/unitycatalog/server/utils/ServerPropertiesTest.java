@@ -229,6 +229,42 @@ public class ServerPropertiesTest {
   }
 
   @Test
+  public void testStorageCleanupConfiguration() {
+    ServerProperties defaults = new ServerProperties();
+    assertThat(defaults.getStorageCleanupBatchSize()).isEqualTo(1000);
+    assertThat(defaults.getStorageCleanupPollInterval()).isEqualTo(Duration.ofSeconds(5));
+    assertThat(defaults.getStorageCleanupTimeSlice()).isEqualTo(Duration.ofSeconds(20));
+    assertThat(defaults.getStorageCleanupRequestTimeout()).isEqualTo(Duration.ofSeconds(5));
+    assertThat(defaults.getStorageCleanupLeaseDuration()).isEqualTo(Duration.ofMinutes(1));
+    assertThat(defaults.getStorageCleanupRetryBackoff()).isEqualTo(Duration.ofSeconds(30));
+
+    testInvalidProperty(
+        Property.STORAGE_CLEANUP_POLL_INTERVAL,
+        "PT0.000000001S",
+        "server.storage-cleanup.poll-interval",
+        "Expected at least one millisecond");
+    testInvalidProperty(
+        Property.STORAGE_CLEANUP_BATCH_SIZE,
+        "0",
+        "server.storage-cleanup.batch-size",
+        "Expected a positive integer");
+
+    Properties requestTooLong = new Properties();
+    requestTooLong.setProperty(Property.STORAGE_CLEANUP_TIME_SLICE.getKey(), "PT2S");
+    requestTooLong.setProperty(Property.STORAGE_CLEANUP_REQUEST_TIMEOUT.getKey(), "PT2S");
+    assertThatThrownBy(() -> new ServerProperties(requestTooLong))
+        .isInstanceOf(BaseException.class)
+        .hasMessageContaining("time-slice must allow one list and delete request");
+
+    Properties leaseTooShort = new Properties();
+    leaseTooShort.setProperty(Property.STORAGE_CLEANUP_TIME_SLICE.getKey(), "PT20S");
+    leaseTooShort.setProperty(Property.STORAGE_CLEANUP_LEASE_DURATION.getKey(), "PT20S");
+    assertThatThrownBy(() -> new ServerProperties(leaseTooShort))
+        .isInstanceOf(BaseException.class)
+        .hasMessageContaining("lease-duration must be longer than the cleanup time slice");
+  }
+
+  @Test
   public void testEffectiveCookieTimeout() {
     ServerProperties serverProperties = new ServerProperties();
     assertThat(serverProperties.getEffectiveCookieTimeout()).isEqualTo(Duration.parse("PT24H"));
