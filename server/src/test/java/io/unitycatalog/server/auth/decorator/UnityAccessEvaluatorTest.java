@@ -108,6 +108,7 @@ class UnityAccessEvaluatorTest {
             new UnityAccessEvaluator(authorizer, true),
             principal,
             "#authorize(#principal, #table, OWNER)",
+            "",
             Map.of(),
             Map.of(),
             mock(KeyMapper.class))
