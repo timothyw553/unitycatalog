@@ -4,6 +4,7 @@ import static io.unitycatalog.server.model.SecurableType.CATALOG;
 import static io.unitycatalog.server.model.SecurableType.METASTORE;
 import static io.unitycatalog.server.model.SecurableType.SCHEMA;
 import static io.unitycatalog.server.model.SecurableType.TABLE;
+import static io.unitycatalog.server.persist.model.Privileges.MANAGE;
 import static io.unitycatalog.server.persist.model.Privileges.MODIFY;
 import static io.unitycatalog.server.persist.model.Privileges.SELECT;
 import static io.unitycatalog.server.persist.model.Privileges.USE_CATALOG;
@@ -27,7 +28,6 @@ import io.unitycatalog.server.persist.model.Privileges;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -201,7 +201,7 @@ class UnityAccessEvaluatorTest {
   }
 
   @Test
-  void getTableRequiresSelectOrAnOwnerRule() throws Exception {
+  void getTableAcceptsScopedOwnershipOrMetadataGrants() throws Exception {
     assertGetTable(null, Set.of(), false, false);
     assertGetTable(null, Set.of(USE_CATALOG, USE_SCHEMA), false, false);
     // MODIFY without SELECT passes only with strict checks off.
@@ -211,6 +211,9 @@ class UnityAccessEvaluatorTest {
     assertGetTable(null, Set.of(SELECT, MODIFY), false, false);
     assertGetTable(null, Set.of(USE_CATALOG, USE_SCHEMA, SELECT), true, true);
     assertGetTable(null, Set.of(USE_CATALOG, USE_SCHEMA, SELECT, MODIFY), true, true);
+    assertGetTable(null, Set.of(MANAGE), false, false);
+    assertGetTable(null, Set.of(USE_CATALOG, MANAGE), false, false);
+    assertGetTable(null, Set.of(USE_CATALOG, USE_SCHEMA, MANAGE), true, true);
     assertGetTable(METASTORE, Set.of(), true, true);
     assertGetTable(CATALOG, Set.of(), true, true);
     assertGetTable(SCHEMA, Set.of(USE_SCHEMA, SELECT, MODIFY), false, false);
@@ -250,26 +253,24 @@ class UnityAccessEvaluatorTest {
     when(authorizer.authorize(
             principal, TABLE, resources.get(SecurableType.TABLE), Privileges.MODIFY))
         .thenReturn(grants.contains(MODIFY));
-
-    Set<Privileges> tableGrants = EnumSet.noneOf(Privileges.class);
-    if (ownedResource == SecurableType.TABLE) {
-      tableGrants.add(Privileges.OWNER);
-    }
-    if (grants.contains(SELECT)) {
-      tableGrants.add(Privileges.SELECT);
-    }
-    if (grants.contains(MODIFY)) {
-      tableGrants.add(Privileges.MODIFY);
-    }
+    when(authorizer.authorize(
+            principal, TABLE, resources.get(SecurableType.TABLE), Privileges.SELECT))
+        .thenReturn(grants.contains(SELECT));
+    when(authorizer.authorize(
+            principal, TABLE, resources.get(SecurableType.TABLE), Privileges.MANAGE))
+        .thenReturn(grants.contains(MANAGE));
     when(authorizer.authorizeAny(
-            eq(principal),
-            eq(TABLE),
-            eq(resources.get(SecurableType.TABLE)),
-            any(Privileges[].class)))
+            eq(principal), any(SecurableType.class), any(UUID.class), any(Privileges[].class)))
         .thenAnswer(
             invocation ->
                 Arrays.stream((Privileges[]) invocation.getRawArguments()[3])
-                    .anyMatch(tableGrants::contains));
+                    .anyMatch(
+                        privilege ->
+                            authorizer.authorize(
+                                principal,
+                                invocation.getArgument(1),
+                                invocation.getArgument(2),
+                                privilege)));
 
     for (boolean strictPrivilegeChecks : new boolean[] {true, false}) {
       assertThat(
