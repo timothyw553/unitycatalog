@@ -290,13 +290,24 @@ class UnityAccessEvaluatorTest {
                     .anyMatch(assignments.get(invocation.getArgument(2))::contains));
 
     for (boolean strictPrivilegeChecks : new boolean[] {true, false}) {
-      assertThat(
-              new UnityAccessEvaluator(authorizer, strictPrivilegeChecks)
-                  .evaluate(principal, AuthorizeExpressions.GET_TABLE, resources, Map.of()))
+      UnityAccessEvaluator evaluator = new UnityAccessEvaluator(authorizer, strictPrivilegeChecks);
+      assertThat(evaluator.evaluate(principal, AuthorizeExpressions.GET_TABLE, resources, Map.of()))
           .as(
               "owner=%s, metadata=%s, grants=%s, strict=%s",
               ownedResource, metadataResource, grants, strictPrivilegeChecks)
           .isEqualTo(strictPrivilegeChecks ? expectedStrict : expectedLegacy);
+      if (metadataResource != null) {
+        assertThat(
+                evaluator.evaluate(
+                    principal,
+                    AuthorizeExpressions.VEND_ICEBERG_TABLE_CREDENTIAL,
+                    resources,
+                    Map.of()))
+            .as(
+                "metadata=%s, grants=%s, strict=%s",
+                metadataResource, grants, strictPrivilegeChecks)
+            .isFalse();
+      }
     }
   }
 

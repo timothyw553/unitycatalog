@@ -14,6 +14,7 @@ import static org.mockito.Mockito.spy;
 import io.unitycatalog.client.ApiClient;
 import io.unitycatalog.client.api.CatalogsApi;
 import io.unitycatalog.client.api.CredentialsApi;
+import io.unitycatalog.client.api.DeltaCommitsApi;
 import io.unitycatalog.client.api.ExternalLocationsApi;
 import io.unitycatalog.client.api.FunctionsApi;
 import io.unitycatalog.client.api.GrantsApi;
@@ -26,6 +27,7 @@ import io.unitycatalog.client.api.VolumesApi;
 import io.unitycatalog.client.delta.api.DeltaTablesApi;
 import io.unitycatalog.client.delta.api.DeltaTemporaryCredentialsApi;
 import io.unitycatalog.client.delta.model.DeltaCredentialOperation;
+import io.unitycatalog.client.delta.model.DeltaLoadTableResponse;
 import io.unitycatalog.client.model.ColumnTypeName;
 import io.unitycatalog.client.model.CreateFunction;
 import io.unitycatalog.client.model.CreateFunctionRequest;
@@ -33,6 +35,9 @@ import io.unitycatalog.client.model.CreateModelVersion;
 import io.unitycatalog.client.model.CreateRegisteredModel;
 import io.unitycatalog.client.model.CreateTable;
 import io.unitycatalog.client.model.CreateVolumeRequestContent;
+import io.unitycatalog.client.model.DataSourceFormat;
+import io.unitycatalog.client.model.DeltaCommit;
+import io.unitycatalog.client.model.DeltaCommitInfo;
 import io.unitycatalog.client.model.FunctionParameterInfos;
 import io.unitycatalog.client.model.GenerateTemporaryModelVersionCredential;
 import io.unitycatalog.client.model.GenerateTemporaryPathCredential;
@@ -57,6 +62,7 @@ import io.unitycatalog.client.model.VolumeOperation;
 import io.unitycatalog.client.model.VolumeType;
 import io.unitycatalog.server.persist.model.Privileges;
 import io.unitycatalog.server.persist.utils.FileOperations;
+import io.unitycatalog.server.sdk.tables.SdkTableOperations;
 import io.unitycatalog.server.utils.IcebergRestClient;
 import io.unitycatalog.server.utils.TestUtils;
 import java.util.List;
@@ -534,6 +540,62 @@ public class SdkReadMetadataAccessControlTest extends SdkAccessControlBaseCRUDTe
         .singleElement()
         .satisfies(
             credential -> assertThat(credential.config()).containsAllEntriesOf(CREDENTIAL_CONFIG));
+  }
+
+  @Test
+  public void managedDeltaLoadIncludesCommitMetadataWithoutDataCredentials() throws Exception {
+    createTestUser(REGULAR_1);
+    ApiClient metadataReader = TestUtils.createApiClient(createTestUserServerConfig(REGULAR_1));
+    String name = "managed_delta_table";
+    TableInfo managedTable =
+        new SdkTableOperations(adminApiClient)
+            .createTable(
+                new CreateTable()
+                    .catalogName(CATALOG_NAME)
+                    .schemaName(SCHEMA_NAME)
+                    .name(name)
+                    .tableType(TableType.MANAGED)
+                    .dataSourceFormat(DataSourceFormat.DELTA)
+                    .columns(TEST_COLUMNS));
+    new DeltaCommitsApi(adminApiClient)
+        .commit(
+            new DeltaCommit()
+                .tableId(managedTable.getTableId())
+                .tableUri(managedTable.getStorageLocation())
+                .commitInfo(
+                    new DeltaCommitInfo()
+                        .version(1L)
+                        .fileName("metadata-commit.json")
+                        .fileSize(100L)
+                        .timestamp(1700000000000L)
+                        .fileModificationTimestamp(1700000000000L)));
+    grantPermissions(REGULAR_1, SecurableType.CATALOG, CATALOG_NAME, Privileges.USE_CATALOG);
+    grantPermissions(REGULAR_1, SecurableType.SCHEMA, SCHEMA_FULL_NAME, Privileges.USE_SCHEMA);
+    DeltaTablesApi delta = new DeltaTablesApi(metadataReader);
+    assertDeltaPermissionDenied(() -> delta.loadTable(CATALOG_NAME, SCHEMA_NAME, name));
+    grantPermissions(
+        REGULAR_1, SecurableType.TABLE, SCHEMA_FULL_NAME + "." + name, Privileges.READ_METADATA);
+
+    DeltaLoadTableResponse response = delta.loadTable(CATALOG_NAME, SCHEMA_NAME, name);
+    assertThat(response)
+        .isEqualTo(new DeltaTablesApi(adminApiClient).loadTable(CATALOG_NAME, SCHEMA_NAME, name));
+    assertThat(response.getLatestTableVersion()).isEqualTo(1L);
+    assertThat(response.getCommits())
+        .singleElement()
+        .satisfies(
+            commit -> {
+              assertThat(commit.getVersion()).isEqualTo(1L);
+              assertThat(commit.getFileName()).isEqualTo("metadata-commit.json");
+              assertThat(commit.getFileSize()).isEqualTo(100L);
+              assertThat(commit.getTimestamp()).isEqualTo(1700000000000L);
+              assertThat(commit.getFileModificationTimestamp()).isEqualTo(1700000000000L);
+            });
+    DeltaTemporaryCredentialsApi credentials = new DeltaTemporaryCredentialsApi(metadataReader);
+    for (DeltaCredentialOperation operation :
+        List.of(DeltaCredentialOperation.READ, DeltaCredentialOperation.READ_WRITE)) {
+      assertDeltaPermissionDenied(
+          () -> credentials.getTableCredentials(operation, CATALOG_NAME, SCHEMA_NAME, name));
+    }
   }
 
   private void assertMetadataAccess(List<MetadataRead> reads, boolean allowed) throws Exception {

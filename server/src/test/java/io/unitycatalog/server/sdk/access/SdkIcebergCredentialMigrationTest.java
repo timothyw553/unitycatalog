@@ -122,5 +122,12 @@ public class SdkIcebergCredentialMigrationTest extends SdkAccessControlBaseCRUDT
     assertIcebergApiException(
         () -> modifier.updateTable(CATALOG, SCHEMA, TABLE, update), 403, "Access denied");
     tableOwner.updateTable(CATALOG, SCHEMA, TABLE, update);
+
+    // Metadata access does not supply credentials during migration.
+    grantPermissions(
+        "no-table-access@localhost", SecurableType.TABLE, fullName, Privileges.READ_METADATA);
+    assertThat(noTableAccess.loadTable(CATALOG, SCHEMA, TABLE).config()).isEmpty();
+    assertIcebergApiException(
+        () -> noTableAccess.loadCredentials(CATALOG, SCHEMA, TABLE), 403, "Access denied");
   }
 }

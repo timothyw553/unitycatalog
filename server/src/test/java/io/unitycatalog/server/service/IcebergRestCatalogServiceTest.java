@@ -222,7 +222,11 @@ public class IcebergRestCatalogServiceTest {
                 SecurableType.METASTORE, UUID.randomUUID(),
                 SecurableType.TABLE, tableId));
     when(authorizer.authorizeAny(
-            principalId, SecurableType.CATALOG, catalogId, Privileges.OWNER, Privileges.USE_CATALOG))
+            principalId,
+            SecurableType.CATALOG,
+            catalogId,
+            Privileges.OWNER,
+            Privileges.USE_CATALOG))
         .thenReturn(true);
     when(authorizer.authorizeAny(
             principalId, SecurableType.SCHEMA, schemaId, Privileges.OWNER, Privileges.USE_SCHEMA))
@@ -233,7 +237,8 @@ public class IcebergRestCatalogServiceTest {
             BaseException.class,
             error -> assertThat(error.getErrorCode()).isEqualTo(ErrorCode.PERMISSION_DENIED));
     verify(authorizer)
-        .authorizeAny(principalId, SecurableType.TABLE, tableId, Privileges.OWNER, Privileges.SELECT);
+        .authorizeAny(
+            principalId, SecurableType.TABLE, tableId, Privileges.OWNER, Privileges.SELECT);
     verifyNoInteractions(tableConfigService);
     verify(authorizer, never()).refreshAuthorizations(anyLong());
   }
