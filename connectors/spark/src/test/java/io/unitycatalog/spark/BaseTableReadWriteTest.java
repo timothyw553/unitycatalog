@@ -16,11 +16,16 @@ import io.unitycatalog.client.model.TableType;
 import io.unitycatalog.server.base.table.TableOperations;
 import io.unitycatalog.server.persist.utils.PagedListingHelper;
 import io.unitycatalog.server.sdk.tables.SdkTableOperations;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -977,6 +982,64 @@ public abstract class BaseTableReadWriteTest extends BaseSparkIntegrationTest {
     String s = typeJson.replaceAll(",\\s*" + entry, "");
     s = s.replaceAll(entry + "\\s*,", "");
     return s.replaceAll(entry, "");
+  }
+
+  /**
+   * Pins how a VOID (NullType) column behaves on each Spark version. All versions keep the column
+   * in the table schema; Spark 4.1+ reads it back as null, while Spark 4.0 fails to read it with an
+   * internal error. Delta never writes a void column to the data files. UC stores the column as
+   * NULL ("void") on managed tables; external Delta tables don't push their columns to UC.
+   */
+  @Test
+  @EnabledIf("testingDelta")
+  public void testVoidColumn() throws Exception {
+    session = createSparkSessionWithCatalogs(sessionCatalogNames().toArray(new String[0]));
+    String fullTableName =
+        setupTable(
+            new TableSetupOptions()
+                .setCatalogName(CATALOG_NAME)
+                .setTableName(TEST_TABLE + "_void")
+                .setColumns(List.of(Pair.of("a", "INT"), Pair.of("n", "VOID"))));
+
+    sql("INSERT INTO %s (a) VALUES (1)", fullTableName);
+    validateRows(sql("SELECT a FROM %s", fullTableName), 1);
+    StructType schema = session.table(fullTableName).schema();
+    assertThat(schema.fieldNames()).containsExactly("a", "n");
+    assertThat(schema.apply("n").dataType().simpleString()).isEqualTo("void");
+    if (isSparkAtLeast(4, 1)) {
+      assertThat(sql("SELECT * FROM %s", fullTableName).get(0).isNullAt(1)).isTrue();
+    } else {
+      assertThatThrownBy(() -> sql("SELECT * FROM %s", fullTableName))
+          .hasMessageContaining("Couldn't find n");
+    }
+
+    TableInfo tableInfo = tableOperations.getTable(fullTableName);
+    if (canUpdateColumnsToUC()) {
+      List<ColumnInfo> columns = tableInfo.getColumns();
+      assertThat(columns.stream().map(ColumnInfo::getName)).containsExactly("a", "n");
+      assertThat(columns.get(1).getTypeName()).isEqualTo(ColumnTypeName.NULL);
+      assertThat(columns.get(1).getTypeText()).isEqualTo("void");
+      assertThat(stripColumnMappingMetadata(columns.get(1).getTypeJson()))
+          .isEqualTo("{\"name\":\"n\",\"type\":\"void\",\"nullable\":true,\"metadata\":{}}");
+    }
+
+    // The void column is never physically written: every data file holds only the INT column.
+    // Only checkable when the table is on the local filesystem (not emulated S3).
+    if (!tableInfo.getStorageLocation().startsWith("file:")) {
+      return;
+    }
+    try (Stream<Path> files = Files.walk(Paths.get(URI.create(tableInfo.getStorageLocation())))) {
+      List<Path> dataFiles =
+          files
+              .filter(f -> f.getFileName().toString().endsWith(".parquet"))
+              .collect(Collectors.toList());
+      assertThat(dataFiles).isNotEmpty();
+      for (Path dataFile : dataFiles) {
+        assertThat(session.read().parquet(dataFile.toUri().toString()).schema().fields())
+            .as("columns in %s", dataFile)
+            .hasSize(1);
+      }
+    }
   }
 
   protected String quoteEntityName(String entityName) {
